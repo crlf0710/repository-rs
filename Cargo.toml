@@ -1,0 +1,13 @@
+[package]
+name = "repository"
+version = "0.0.1"
+authors = ["Charles Lew <crlf0710@gmail.com>"]
+license = "MIT OR APACHE-2.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+hashbrown = {version = "0.8.0", features = ['raw']}
+vec_map = "0.8.2"
+thiserror = "1.0.20"
