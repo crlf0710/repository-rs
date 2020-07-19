@@ -115,7 +115,7 @@ impl Repo {
         EntityId(new_id)
     }
 
-    pub fn insert<T: Any>(&mut self, v: T) -> EntityId {
+    fn create_entity<T: Any>(&mut self, v: T) -> EntityId {
         let bucket = self.ensure_type_storage_bucket::<T>();
         let bucket_id = unsafe { self.entity_table.bucket_index(&bucket) };
         let storage_mut = unsafe { bucket.as_mut() };
@@ -125,6 +125,15 @@ impl Repo {
             storage_idx,
         };
         self.allocate_entity(record)
+    }
+
+    pub fn insert<T: Any>(&mut self, v: T) -> EntityPtr<T> {
+        let entity_id = self.create_entity(v);
+        let entity_ptr = entity_id
+            .cast_ptr(self)
+            .ok_or(Error::InternalError001)
+            .unwrap();
+        entity_ptr
     }
 }
 
