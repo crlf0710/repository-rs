@@ -47,6 +47,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::ops;
 use hashbrown::raw::{self as hashbrown_raw, RawTable};
+use std::hash::Hash;
 use thiserror::Error;
 use vec_map::VecMap;
 
@@ -296,10 +297,43 @@ impl EntityId {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityPtr<T: Any> {
     record: EntityRecord,
     phantom: PhantomData<*mut T>,
+}
+
+impl<T: Any> Copy for EntityPtr<T> {}
+
+impl<T: Any> Clone for EntityPtr<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: Any> PartialEq for EntityPtr<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.record.eq(&other.record)
+    }
+}
+
+impl<T: Any> PartialOrd for EntityPtr<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.record.partial_cmp(&other.record)
+    }
+}
+
+impl<T: Any> Eq for EntityPtr<T> {}
+
+impl<T: Any> Ord for EntityPtr<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.record.cmp(&other.record)
+    }
+}
+
+impl<T: Any> Hash for EntityPtr<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.record.hash(state)
+    }
 }
 
 unsafe impl<T: Any> Send for EntityPtr<T> {}
@@ -399,11 +433,18 @@ impl<'a, T: Any> EntityMut<'a, T> {
     }
 }
 
-#[derive(Copy, Clone)]
 pub struct EntityRef<'a, T> {
     repo: &'a Repo,
     record: EntityRecord,
     phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T> Copy for EntityRef<'a, T> {}
+
+impl<'a, T> Clone for EntityRef<'a, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<'a, T: Any> ops::Deref for EntityRef<'a, T> {
