@@ -135,6 +135,10 @@ impl Repo {
             .unwrap();
         entity_ptr
     }
+
+    pub fn insert_for_id<T: Any>(&mut self, v: T) -> EntityId {
+        self.create_entity(v)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -425,18 +429,18 @@ fn test_repo_basic() {
     }
 
     let mut repo = Repo::new();
-    let a = repo.insert(42i32);
+    let a = repo.insert_for_id(42i32);
     let a_ptr = a.cast_ptr::<i32>(&repo).unwrap();
     assert_eq!(42i32, *a_ptr.get_ref(&repo).unwrap());
     let a_wrong_ptr = a.cast_ptr::<u32>(&repo);
     assert_eq!(None, a_wrong_ptr);
 
-    let b = repo.insert("hello");
+    let b = repo.insert_for_id("hello");
     assert_eq!(42i32, *a_ptr.get_ref(&repo).unwrap());
     let b_ref = b.cast_ref::<&'static str>(&repo).unwrap();
     assert_eq!("hello", *b_ref);
 
-    let c = repo.insert(s("world"));
+    let c = repo.insert_for_id(s("world"));
     assert_eq!(s("world"), *c.cast_mut::<String>(&mut repo).unwrap());
     *c.cast_mut::<String>(&mut repo).unwrap() = s("World");
     assert_eq!(s("World"), *c.cast_mut::<String>(&mut repo).unwrap());
