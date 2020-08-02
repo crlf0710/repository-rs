@@ -151,9 +151,16 @@ struct EntityRecord {
 struct EntityStorage {
     type_id: TypeId,
     type_layout: Layout,
+    type_drop: fn(usize, usize, usize),
     data_ptr: usize,
     data_len: usize,
     data_capacity: usize,
+}
+
+impl Drop for EntityStorage {
+    fn drop(&mut self) {
+        (self.type_drop)(self.data_ptr, self.data_len, self.data_capacity);
+    }
 }
 
 impl EntityStorage {
@@ -162,6 +169,9 @@ impl EntityStorage {
         EntityStorage {
             type_id: TypeId::of::<T>(),
             type_layout: Layout::new::<T>(),
+            type_drop: |data_ptr, data_len, data_capacity| {
+                let _ = unsafe { Vec::from_raw_parts(data_ptr as *mut T, data_len, data_capacity) };
+            },
             data_ptr: null_mut::<T>() as usize,
             data_len: 0,
             data_capacity: 0,
