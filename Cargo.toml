@@ -2,8 +2,9 @@
 name = "repository"
 version = "0.0.1"
 authors = ["Charles Lew <crlf0710@gmail.com>"]
-license = "MIT OR APACHE-2.0"
+license = "MIT OR Apache-2.0"
 edition = "2018"
+description = "A repository for all kinds of entities."
 repository = "https://github.com/crlf0710/repository-rs"
 
 [dependencies]
