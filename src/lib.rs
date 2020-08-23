@@ -142,7 +142,7 @@ impl Repo {
             .view_mut::<T>(&mut self.entity_catalog, bucket_id)
             .unwrap()
             .insert(v);
-        EntityId(entity_id)
+        EntityId(entity_id, PhantomData)
     }
 
     /// Add a new value into the repository.
@@ -169,7 +169,8 @@ impl Repo {
         let mut storage_view_mut = unsafe {
             bucket
                 .as_mut()
-                .view_mut::<T>(&mut self.entity_catalog, record.bucket_id).ok()?
+                .view_mut::<T>(&mut self.entity_catalog, record.bucket_id)
+                .ok()?
         };
         storage_view_mut.remove(record.storage_idx)
     }
@@ -347,20 +348,84 @@ impl<'a, T: Any> EntityStorageViewMut<'a, T> {
         }
     }
 }
+/// Conversion from reference to a repository reference
+pub trait AsRepoRef {
+    /// Performs the conversion
+    fn as_repo_ref(&self) -> &Repo;
+}
+
+/// Conversion from reference to a repository reference
+pub trait AsRepoMut: AsRepoRef {
+    /// Performs the conversion
+    fn as_repo_mut(&mut self) -> &mut Repo;
+}
+
+impl AsRepoRef for Repo {
+    fn as_repo_ref(&self) -> &Repo {
+        self
+    }
+}
+
+impl AsRepoMut for Repo {
+    fn as_repo_mut(&mut self) -> &mut Repo {
+        self
+    }
+}
 
 /// An index handle to a value in repository.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EntityId(usize);
+pub struct EntityId<R = Repo>(usize, PhantomData<R>);
 
-impl fmt::Debug for EntityId {
+impl<R> Copy for EntityId<R> {}
+
+impl<R> Clone for EntityId<R> {
+    fn clone(&self) -> Self {
+        Self(self.0, self.1)
+    }
+}
+
+impl<R> PartialEq for EntityId<R> {
+    fn eq(&self, other: &Self) -> bool {
+        PartialEq::eq(&self.0, &other.0)
+    }
+}
+
+impl<R> Eq for EntityId<R> {}
+
+impl<R> PartialOrd for EntityId<R> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        PartialOrd::partial_cmp(&self.0, &other.0)
+    }
+}
+
+impl<R> Ord for EntityId<R> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        Ord::cmp(&self.0, &other.0)
+    }
+}
+
+impl<R> Hash for EntityId<R> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        Hash::hash(&self.0, state)
+    }
+}
+
+impl<R> fmt::Debug for EntityId<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "EntityId({})", self.0)
     }
 }
 
-impl EntityId {
+impl<R> EntityId<R> {
+    /// Convert entity id to work with another repository type.
+    pub fn cast_repo<R2>(self) -> EntityId<R2> {
+        EntityId(self.0, PhantomData)
+    }
+}
+
+impl<R: AsRepoRef> EntityId<R> {
     /// Try to downcast this index handle to a pointer handle.
-    pub fn cast_ptr<T: Any>(self, repo: &Repo) -> Option<EntityPtr<T>> {
+    pub fn cast_ptr<T: Any>(self, repo: &R) -> Option<EntityPtr<T>> {
+        let repo = repo.as_repo_ref();
         let &record = repo.entity_catalog.get(self.0)?;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view = unsafe { bucket.as_ref().view::<T>().ok()? };
@@ -372,7 +437,8 @@ impl EntityId {
     }
 
     /// Try to downcast this index handle to a reference to the value.
-    pub fn cast_ref<T: Any>(self, repo: &Repo) -> Option<EntityRef<'_, T>> {
+    pub fn cast_ref<T: Any>(self, repo: &R) -> Option<EntityRef<'_, T>> {
+        let repo = repo.as_repo_ref();
         let &record = repo.entity_catalog.get(self.0)?;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view = unsafe { bucket.as_ref().view::<T>().ok()? };
@@ -383,9 +449,12 @@ impl EntityId {
             phantom: PhantomData,
         })
     }
+}
 
+impl<R: AsRepoMut> EntityId<R> {
     /// Try to downcast this index handle to a mutable reference to the value.
-    pub fn cast_mut<T: Any>(self, repo: &mut Repo) -> Option<EntityMut<'_, T>> {
+    pub fn cast_mut<T: Any>(self, repo: &mut R) -> Option<EntityMut<'_, T>> {
+        let repo = repo.as_repo_mut();
         let &record = repo.entity_catalog.get(self.0)?;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view_mut = unsafe {
@@ -404,49 +473,49 @@ impl EntityId {
 }
 
 /// A pointer handle to a value in repository.
-pub struct EntityPtr<T: Any> {
+pub struct EntityPtr<T: Any, R = Repo> {
     record: EntityRecord,
-    phantom: PhantomData<*mut T>,
+    phantom: PhantomData<(*mut T, *mut R)>,
 }
 
-impl<T: Any> Copy for EntityPtr<T> {}
+impl<T: Any, R> Copy for EntityPtr<T, R> {}
 
-impl<T: Any> Clone for EntityPtr<T> {
+impl<T: Any, R> Clone for EntityPtr<T, R> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: Any> PartialEq for EntityPtr<T> {
+impl<T: Any, R> PartialEq for EntityPtr<T, R> {
     fn eq(&self, other: &Self) -> bool {
         self.record.eq(&other.record)
     }
 }
 
-impl<T: Any> PartialOrd for EntityPtr<T> {
+impl<T: Any, R> PartialOrd for EntityPtr<T, R> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         self.record.partial_cmp(&other.record)
     }
 }
 
-impl<T: Any> Eq for EntityPtr<T> {}
+impl<T: Any, R> Eq for EntityPtr<T, R> {}
 
-impl<T: Any> Ord for EntityPtr<T> {
+impl<T: Any, R> Ord for EntityPtr<T, R> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.record.cmp(&other.record)
     }
 }
 
-impl<T: Any> Hash for EntityPtr<T> {
+impl<T: Any, R> Hash for EntityPtr<T, R> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.record.hash(state)
     }
 }
 
-unsafe impl<T: Any> Send for EntityPtr<T> {}
-unsafe impl<T: Any> Sync for EntityPtr<T> {}
+unsafe impl<T: Any, R> Send for EntityPtr<T, R> {}
+unsafe impl<T: Any, R> Sync for EntityPtr<T, R> {}
 
-impl<T: Any> fmt::Debug for EntityPtr<T> {
+impl<T: Any, R> fmt::Debug for EntityPtr<T, R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -456,9 +525,20 @@ impl<T: Any> fmt::Debug for EntityPtr<T> {
     }
 }
 
-impl<T: Any> EntityPtr<T> {
+impl<T: Any, R> EntityPtr<T, R> {
+    /// Convert entity pointer to work with another repository type.
+    pub fn cast_repo<R2>(self) -> EntityPtr<T, R2> {
+        EntityPtr {
+            record: self.record,
+            phantom: PhantomData
+        }
+    }
+}
+
+impl<T: Any, R: AsRepoRef> EntityPtr<T, R> {
     /// Try to retrieve a reference to the value.
-    pub fn get_ref(self, repo: &Repo) -> Result<EntityRef<'_, T>, Error> {
+    pub fn get_ref(self, repo: &R) -> Result<EntityRef<'_, T>, Error> {
+        let repo = repo.as_repo_ref();
         let record = self.record;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view = unsafe { bucket.as_ref().view::<T>()? };
@@ -469,9 +549,12 @@ impl<T: Any> EntityPtr<T> {
             phantom: PhantomData,
         })
     }
+}
 
+impl<T: Any, R: AsRepoMut> EntityPtr<T, R> {
     /// Try to retrieve a mutable reference to the value.
-    pub fn get_mut(self, repo: &mut Repo) -> Result<EntityMut<'_, T>, Error> {
+    pub fn get_mut(self, repo: &mut R) -> Result<EntityMut<'_, T>, Error> {
+        let repo = repo.as_repo_mut();
         let record = self.record;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view_mut = unsafe {
