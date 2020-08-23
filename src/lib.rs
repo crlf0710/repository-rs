@@ -38,42 +38,72 @@
 // IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+#![deny(warnings, missing_docs, missing_debug_implementations)]
+//! A special kind of arena that can support storing multiple data types.
+//!
+//! `Repository` provides storage for multiple data types, it provides
+//! its own kind of index handle called `EntityId` and its own kind of typed
+//! handle called `EntityPtr<T>`. With these handles it allows the values
+//! resident in the same `Repository` to reference each other easily.
+//!
+//! The data behind the `EntityPtr<T>` handle can be accessed when you have
+//! a corresponding reference to the whole repository.
+//!
+//! The data behind the `EntityId` handle can be accessed when you know its
+//! type and have a corresponding reference to the whole repository.
+//!
+//! Note that these handles may be reused after remove operation is executed.
+
 extern crate alloc;
 
+use crate::slab::Slab;
 use alloc::alloc::Layout;
 use alloc::rc::Rc;
 use core::any::{Any, TypeId};
 use core::fmt;
 use core::marker::PhantomData;
+use core::mem::ManuallyDrop;
 use core::ops;
 use hashbrown::raw::{self as hashbrown_raw, RawTable};
 use std::hash::Hash;
 use thiserror::Error;
-use vec_map::VecMap;
-
-pub struct Repo {
-    next_id: usize,
-    index: VecMap<EntityRecord>,
-    entity_table: RawTable<EntityStorage>,
-    marker: PhantomData<Rc<()>>,
-}
 
 fn type_id_to_u64(v: TypeId) -> u64 {
     use std::mem::transmute;
     unsafe { transmute(v) }
 }
 
-fn vec_into_raw_parts<T>(me: Vec<T>) -> (*mut T, usize, usize) {
-    use std::mem::ManuallyDrop;
-    let mut me = ManuallyDrop::new(me);
-    (me.as_mut_ptr(), me.len(), me.capacity())
+mod slab;
+
+/// A special kind of arena that can support storing multiple data types.
+///
+/// See the [module documentation] for more details.
+///
+/// [module documentation]: index.html
+pub struct Repo {
+    entity_catalog: Slab<EntityRecord>,
+    entity_table: RawTable<EntityStorage>,
+    marker: PhantomData<Rc<()>>,
+}
+
+impl Default for Repo {
+    fn default() -> Self {
+        Repo::new()
+    }
+}
+
+impl fmt::Debug for Repo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{{Repo}}")?;
+        Ok(())
+    }
 }
 
 impl Repo {
+    /// Create a new `Repo`.
     pub fn new() -> Self {
         Repo {
-            next_id: 0,
-            index: VecMap::new(),
+            entity_catalog: Slab::new(),
             entity_table: RawTable::new(),
             marker: PhantomData,
         }
@@ -104,30 +134,19 @@ impl Repo {
         }
     }
 
-    fn allocate_id(&mut self) -> usize {
-        let new_id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).unwrap();
-        new_id
-    }
-
-    fn allocate_entity(&mut self, rec: EntityRecord) -> EntityId {
-        let new_id = self.allocate_id();
-        self.index.insert(new_id, rec);
-        EntityId(new_id)
-    }
-
     fn create_entity<T: Any>(&mut self, v: T) -> EntityId {
         let bucket = self.ensure_type_storage_bucket::<T>();
         let bucket_id = unsafe { self.entity_table.bucket_index(&bucket) };
         let storage_mut = unsafe { bucket.as_mut() };
-        let storage_idx = storage_mut.view_mut::<T>().unwrap().insert(v);
-        let record = EntityRecord {
-            bucket_id,
-            storage_idx,
-        };
-        self.allocate_entity(record)
+        let (_, entity_id) = storage_mut
+            .view_mut::<T>(&mut self.entity_catalog, bucket_id)
+            .unwrap()
+            .insert(v);
+        EntityId(entity_id)
     }
 
+    /// Add a new value into the repository.
+    /// Returning a pointer handle to this value.
     pub fn insert<T: Any>(&mut self, v: T) -> EntityPtr<T> {
         let entity_id = self.create_entity(v);
         let entity_ptr = entity_id
@@ -137,8 +156,22 @@ impl Repo {
         entity_ptr
     }
 
+    /// Add a new value into the repository.
+    /// Returning an index handle to this value.
     pub fn insert_for_id<T: Any>(&mut self, v: T) -> EntityId {
         self.create_entity(v)
+    }
+
+    /// Remove a value from the repository with its pointer handle.
+    pub fn remove<T: Any>(&mut self, entity_ptr: EntityPtr<T>) -> Option<T> {
+        let record = entity_ptr.record;
+        let bucket = unsafe { self.entity_table.bucket(record.bucket_id) };
+        let mut storage_view_mut = unsafe {
+            bucket
+                .as_mut()
+                .view_mut::<T>(&mut self.entity_catalog, record.bucket_id).ok()?
+        };
+        storage_view_mut.remove(record.storage_idx)
     }
 }
 
@@ -151,30 +184,30 @@ struct EntityRecord {
 struct EntityStorage {
     type_id: TypeId,
     type_layout: Layout,
-    type_drop: fn(usize, usize, usize),
-    data_ptr: usize,
-    data_len: usize,
-    data_capacity: usize,
+    type_drop: fn(slab::ErasedSlab),
+    type_data: slab::ErasedSlab,
+}
+
+struct EntityStorageEntry<T> {
+    data: T,
+    entity_id: usize,
 }
 
 impl Drop for EntityStorage {
     fn drop(&mut self) {
-        (self.type_drop)(self.data_ptr, self.data_len, self.data_capacity);
+        (self.type_drop)(self.type_data);
     }
 }
 
 impl EntityStorage {
     fn new<T: Any>() -> Self {
-        use std::ptr::null_mut;
         EntityStorage {
             type_id: TypeId::of::<T>(),
             type_layout: Layout::new::<T>(),
-            type_drop: |data_ptr, data_len, data_capacity| {
-                let _ = unsafe { Vec::from_raw_parts(data_ptr as *mut T, data_len, data_capacity) };
+            type_drop: |erased_slab| {
+                let _ = unsafe { Slab::<EntityStorageEntry<T>>::from_erased_slab(erased_slab) };
             },
-            data_ptr: null_mut::<T>() as usize,
-            data_len: 0,
-            data_capacity: 0,
+            type_data: Slab::<EntityStorageEntry<T>>::new().into_erased_slab(),
         }
     }
 
@@ -190,7 +223,11 @@ impl EntityStorage {
         })
     }
 
-    fn view_mut<T: Any>(&mut self) -> Result<EntityStorageViewMut<'_, T>, Error> {
+    fn view_mut<'a, T: Any>(
+        &'a mut self,
+        catalog: &'a mut Slab<EntityRecord>,
+        bucket_id: usize,
+    ) -> Result<EntityStorageViewMut<'a, T>, Error> {
         let type_id = TypeId::of::<T>();
         if self.type_id != type_id {
             return Err(Error::InvalidPtr);
@@ -198,8 +235,35 @@ impl EntityStorage {
         debug_assert_eq!(self.type_layout, Layout::new::<T>());
         Ok(EntityStorageViewMut {
             storage: self,
+            catalog,
+            bucket_id,
             phantom: PhantomData,
         })
+    }
+
+    unsafe fn raw_slab<T: Any>(
+        &self,
+    ) -> Result<ManuallyDrop<slab::Slab<EntityStorageEntry<T>>>, Error> {
+        let type_id = TypeId::of::<T>();
+        if self.type_id != type_id {
+            return Err(Error::InvalidPtr);
+        }
+        debug_assert_eq!(self.type_layout, Layout::new::<T>());
+        Ok(ManuallyDrop::new(slab::Slab::from_erased_slab(
+            self.type_data,
+        )))
+    }
+    unsafe fn finish_raw_slab<T: Any>(
+        &mut self,
+        slab: ManuallyDrop<slab::Slab<EntityStorageEntry<T>>>,
+    ) -> Result<(), Error> {
+        let type_id = TypeId::of::<T>();
+        if self.type_id != type_id {
+            return Err(Error::InvalidPtr);
+        }
+        debug_assert_eq!(self.type_layout, Layout::new::<T>());
+        self.type_data = ManuallyDrop::into_inner(slab).into_erased_slab();
+        Ok(())
     }
 }
 
@@ -211,56 +275,80 @@ struct EntityStorageView<'a, T: Any> {
 
 impl<'a, T: Any> EntityStorageView<'a, T> {
     fn is_valid_idx(&self, v: usize) -> bool {
-        v < self.storage.data_len
+        let slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        slab.is_occupied(v)
     }
 
-    fn index(&self, index: usize) -> &'a T {
-        use core::slice;
-        let slice = unsafe {
-            slice::from_raw_parts(self.storage.data_ptr as *const T, self.storage.data_len)
-        };
-        &slice[index]
+    fn index(self, index: usize) -> &'a T {
+        unsafe {
+            &self
+                .storage
+                .type_data
+                .index::<EntityStorageEntry<T>>(index)
+                .data
+        }
     }
 }
 
 struct EntityStorageViewMut<'a, T: Any> {
     storage: &'a mut EntityStorage,
+    catalog: &'a mut Slab<EntityRecord>,
+    bucket_id: usize,
     phantom: PhantomData<&'a mut [T]>,
 }
 
 impl<'a, T: Any> EntityStorageViewMut<'a, T> {
-    #[allow(dead_code)]
     fn is_valid_idx(&self, v: usize) -> bool {
-        v < self.storage.data_len
+        let slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        slab.is_occupied(v)
     }
 
-    fn insert(&mut self, v: T) -> usize {
-        use std::mem::ManuallyDrop;
-        let mut vec = ManuallyDrop::new(unsafe {
-            Vec::from_raw_parts(
-                self.storage.data_ptr as *mut T,
-                self.storage.data_len,
-                self.storage.data_capacity,
-            )
-        });
-        let new_id = vec.len();
-        vec.push(v);
-        let (data_ptr, data_len, data_capacity) = vec_into_raw_parts(ManuallyDrop::into_inner(vec));
-        self.storage.data_ptr = data_ptr as usize;
-        self.storage.data_len = data_len;
-        self.storage.data_capacity = data_capacity;
-        new_id
+    fn insert(&mut self, data: T) -> (usize, usize) {
+        let mut slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        let entity_id = self.catalog.detach_vacant();
+        let entry = EntityStorageEntry { data, entity_id };
+        let storage_idx = slab.push(entry);
+        self.catalog.occupy_vacant(
+            entity_id,
+            EntityRecord {
+                bucket_id: self.bucket_id,
+                storage_idx,
+            },
+        );
+        unsafe { self.storage.finish_raw_slab(slab).unwrap() };
+        (storage_idx, entity_id)
     }
 
-    fn index_mut(&mut self, index: usize) -> &'a mut T {
-        use core::slice;
-        let slice = unsafe {
-            slice::from_raw_parts_mut(self.storage.data_ptr as *mut T, self.storage.data_len)
-        };
-        &mut slice[index]
+    fn remove(&mut self, storage_idx: usize) -> Option<T> {
+        let mut slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        let entry = slab.remove(storage_idx)?;
+        self.catalog.remove(entry.entity_id);
+        Some(entry.data)
+    }
+
+    #[allow(dead_code)]
+    fn index(self, index: usize) -> &'a T {
+        unsafe {
+            &self
+                .storage
+                .type_data
+                .index::<EntityStorageEntry<T>>(index)
+                .data
+        }
+    }
+
+    fn index_mut(self, index: usize) -> &'a mut T {
+        unsafe {
+            &mut self
+                .storage
+                .type_data
+                .index_mut::<EntityStorageEntry<T>>(index)
+                .data
+        }
     }
 }
 
+/// An index handle to a value in repository.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntityId(usize);
 
@@ -271,8 +359,9 @@ impl fmt::Debug for EntityId {
 }
 
 impl EntityId {
+    /// Try to downcast this index handle to a pointer handle.
     pub fn cast_ptr<T: Any>(self, repo: &Repo) -> Option<EntityPtr<T>> {
-        let &record = repo.index.get(self.0)?;
+        let &record = repo.entity_catalog.get(self.0)?;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view = unsafe { bucket.as_ref().view::<T>().ok()? };
         debug_assert!(storage_view.is_valid_idx(record.storage_idx));
@@ -282,8 +371,9 @@ impl EntityId {
         })
     }
 
+    /// Try to downcast this index handle to a reference to the value.
     pub fn cast_ref<T: Any>(self, repo: &Repo) -> Option<EntityRef<'_, T>> {
-        let &record = repo.index.get(self.0)?;
+        let &record = repo.entity_catalog.get(self.0)?;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
         let storage_view = unsafe { bucket.as_ref().view::<T>().ok()? };
         debug_assert!(storage_view.is_valid_idx(record.storage_idx));
@@ -294,10 +384,16 @@ impl EntityId {
         })
     }
 
+    /// Try to downcast this index handle to a mutable reference to the value.
     pub fn cast_mut<T: Any>(self, repo: &mut Repo) -> Option<EntityMut<'_, T>> {
-        let &record = repo.index.get(self.0)?;
+        let &record = repo.entity_catalog.get(self.0)?;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
-        let storage_view_mut = unsafe { bucket.as_mut().view_mut::<T>().ok()? };
+        let storage_view_mut = unsafe {
+            bucket
+                .as_mut()
+                .view_mut::<T>(&mut repo.entity_catalog, record.bucket_id)
+                .ok()?
+        };
         debug_assert!(storage_view_mut.is_valid_idx(record.storage_idx));
         Some(EntityMut {
             repo,
@@ -307,6 +403,7 @@ impl EntityId {
     }
 }
 
+/// A pointer handle to a value in repository.
 pub struct EntityPtr<T: Any> {
     record: EntityRecord,
     phantom: PhantomData<*mut T>,
@@ -360,6 +457,7 @@ impl<T: Any> fmt::Debug for EntityPtr<T> {
 }
 
 impl<T: Any> EntityPtr<T> {
+    /// Try to retrieve a reference to the value.
     pub fn get_ref(self, repo: &Repo) -> Result<EntityRef<'_, T>, Error> {
         let record = self.record;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
@@ -372,10 +470,16 @@ impl<T: Any> EntityPtr<T> {
         })
     }
 
+    /// Try to retrieve a mutable reference to the value.
     pub fn get_mut(self, repo: &mut Repo) -> Result<EntityMut<'_, T>, Error> {
         let record = self.record;
         let bucket = unsafe { repo.entity_table.bucket(record.bucket_id) };
-        let storage_view_mut = unsafe { bucket.as_mut().view_mut::<T>()? };
+        let storage_view_mut = unsafe {
+            bucket
+                .as_mut()
+                .view_mut::<T>(&mut repo.entity_catalog, record.bucket_id)?
+        };
+
         debug_assert!(storage_view_mut.is_valid_idx(record.storage_idx));
         Ok(EntityMut {
             repo,
@@ -385,21 +489,32 @@ impl<T: Any> EntityPtr<T> {
     }
 }
 
+/// Error raised during `Repo` operation.
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum Error {
     #[error("Invalid pointer is specified.")]
+    /// input is no longer a valid pointer.
     InvalidPtr,
     #[error("Internal bucket inconsistency.")]
+    /// repository data become corrupted.
     InternalError001,
 }
 
 const ERROR_INTERNAL_BUCKET_INCONSISTENCY: Error = Error::InternalError001;
 
+/// Represents a mutable reference to a value in repository.
 pub struct EntityMut<'a, T> {
     repo: &'a mut Repo,
     record: EntityRecord,
     phantom: PhantomData<&'a mut T>,
+}
+
+impl<'a, T: Any + fmt::Debug> fmt::Debug for EntityMut<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", **self)?;
+        Ok(())
+    }
 }
 
 impl<'a, T: Any> ops::Deref for EntityMut<'a, T> {
@@ -422,10 +537,10 @@ impl<'a, T: Any> ops::DerefMut for EntityMut<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         let record = self.record;
         let bucket = unsafe { self.repo.entity_table.bucket(record.bucket_id) };
-        let mut storage_view_mut = unsafe {
+        let storage_view_mut = unsafe {
             bucket
                 .as_mut()
-                .view_mut::<T>()
+                .view_mut::<T>(&mut self.repo.entity_catalog, record.bucket_id)
                 .map_err(|_| ERROR_INTERNAL_BUCKET_INCONSISTENCY)
                 .unwrap()
         };
@@ -434,6 +549,7 @@ impl<'a, T: Any> ops::DerefMut for EntityMut<'a, T> {
 }
 
 impl<'a, T: Any> EntityMut<'a, T> {
+    /// Convert a mutable reference to a value in repository to an immutable reference.
     pub fn as_ref<'b>(&'b mut self) -> EntityRef<'b, T> {
         EntityRef {
             repo: self.repo,
@@ -443,6 +559,7 @@ impl<'a, T: Any> EntityMut<'a, T> {
     }
 }
 
+/// Represents a reference to a value in repository.
 pub struct EntityRef<'a, T> {
     repo: &'a Repo,
     record: EntityRecord,
@@ -454,6 +571,13 @@ impl<'a, T> Copy for EntityRef<'a, T> {}
 impl<'a, T> Clone for EntityRef<'a, T> {
     fn clone(&self) -> Self {
         *self
+    }
+}
+
+impl<'a, T: Any + fmt::Debug> fmt::Debug for EntityRef<'a, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", **self)?;
+        Ok(())
     }
 }
 
