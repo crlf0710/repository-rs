@@ -85,7 +85,7 @@ impl<'a> PreallocTx<'a> {
     pub fn preallocate<T: Any>(&mut self) -> EntityPtr<T> {
         let v = self.repo.preallocate_entity::<T>();
         assert!(
-            self.preallocations.contains(&v.record),
+            !self.preallocations.contains(&v.record),
             "unusable preallocation retrieved"
         );
         self.preallocations.insert(v.record);
