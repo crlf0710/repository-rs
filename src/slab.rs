@@ -16,6 +16,13 @@ enum Entry<T> {
     Vacant(usize),
 }
 
+impl<T> Entry<T> {
+    #[inline]
+    fn is_occupied(&self) -> bool {
+        matches!(self, Entry::Occupied(_))
+    }
+}
+
 #[derive(Copy, Clone)]
 /// Type erased storage of a `Slab`.
 pub(crate) struct ErasedSlab {
@@ -84,6 +91,10 @@ impl<T> Slab<T> {
         matches!(self.items.get(index), Some(Entry::Occupied(_)))
     }
 
+    pub(crate) fn is_detached_vacant(&self, index: usize) -> bool {
+        matches!(self.items.get(index), Some(Entry::Vacant(usize::MAX)))
+    }
+
     pub(crate) fn remove(&mut self, index: usize) -> Option<T> {
         match self.items.get_mut(index) {
             Some(e @ Entry::Occupied(_)) => {
@@ -137,11 +148,47 @@ impl<T> Slab<T> {
         }
     }
 
-    pub(crate) fn occupy_vacant(&mut self, index: usize, value: T) {
-        let e = self.items.get_mut(index).unwrap();
-        debug_assert!(matches!(e, Entry::Vacant(usize::MAX)));
+    pub(crate) fn occupy_detached_vacant(&mut self, index: usize, value: T) -> Result<(), EntryError> {
+        let e = match self.items.get_mut(index) {
+            Some(e) => e,
+            None => return Err(EntryError::InvalidIdx),
+        };
+        if !matches!(e, Entry::Vacant(usize::MAX)) {
+            if e.is_occupied() {
+                return Err(EntryError::EntryIsOccupied);
+            } else {
+                return Err(EntryError::EntryIsVacant);
+            }
+        }
         *e = Entry::Occupied(value);
+        Ok(())
     }
+
+    pub(crate) fn reattach_vacant(&mut self, index: usize) -> Result<(), EntryError> {
+        let e = match self.items.get_mut(index) {
+            Some(e) => e,
+            None => return Err(EntryError::InvalidIdx),
+        };
+        if !matches!(e, Entry::Vacant(usize::MAX)) {
+            if e.is_occupied() {
+                return Err(EntryError::EntryIsOccupied);
+            } else {
+                return Err(EntryError::EntryIsVacant);
+            }
+        }
+        *e = Entry::Vacant(self.vacant);
+        self.vacant = index;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum EntryError {
+    InvalidIdx,
+    EntryIsOccupied,
+    EntryIsVacant,
+    #[allow(dead_code)]
+    EntryIsDetachedVacant,
 }
 
 impl ErasedSlab {

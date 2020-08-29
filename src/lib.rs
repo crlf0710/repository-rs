@@ -73,6 +73,7 @@ fn type_id_to_u64(v: TypeId) -> u64 {
     unsafe { transmute(v) }
 }
 
+pub mod prealloc_tx;
 mod slab;
 
 /// A special kind of arena that can support storing multiple data types.
@@ -145,6 +146,63 @@ impl Repo {
         EntityId(entity_id, PhantomData)
     }
 
+    fn preallocate_entity<T: Any>(&mut self) -> EntityPtr<T> {
+        let bucket = self.ensure_type_storage_bucket::<T>();
+        let bucket_id = unsafe { self.entity_table.bucket_index(&bucket) };
+        let storage_mut = unsafe { bucket.as_mut() };
+        let storage_idx = storage_mut
+            .view_mut::<T>(&mut self.entity_catalog, bucket_id)
+            .unwrap()
+            .preallocate();
+        let record = EntityRecord {
+            bucket_id,
+            storage_idx,
+        };
+        EntityPtr {
+            record,
+            phantom: PhantomData,
+        }
+    }
+
+    fn init_preallocate_entity<T:Any>(&mut self, record: EntityRecord, value: T) -> Result<(), (Error, T)> {
+        let bucket = self.ensure_type_storage_bucket::<T>();
+        let bucket_id = unsafe { self.entity_table.bucket_index(&bucket) };
+        let storage_mut = unsafe { bucket.as_mut() };
+        let mut storage_view_mut = storage_mut
+            .view_mut::<T>(&mut self.entity_catalog, bucket_id)
+            .unwrap();
+        if !storage_view_mut.is_preallocated(record.storage_idx) {
+            return Err((Error::InvalidPtr, value));
+        }
+        let _ = storage_view_mut.init_preallocated(record.storage_idx, value);
+        Ok(())
+    }
+
+    fn cancel_preallocate_entity(&mut self, record: EntityRecord) -> Result<bool, Error> {
+        let bucket_id = record.bucket_id;
+        if bucket_id >= self.entity_table.buckets() {
+            return Err(Error::InvalidPtr);
+        }
+        let bucket = unsafe { self.entity_table.bucket(bucket_id) };
+        let storage_mut = unsafe { bucket.as_mut() };
+        match storage_mut.untyped_reattach_vacant(record.storage_idx) {
+            Ok(()) => Ok(true),
+            Err(slab::EntryError::EntryIsOccupied) => Ok(false),
+            Err(slab::EntryError::InvalidIdx) => Err(Error::InvalidPtr),
+            Err(slab::EntryError::EntryIsVacant) => Err(Error::InvalidPtr),
+            Err(slab::EntryError::EntryIsDetachedVacant) => unreachable!(),
+        }
+    }
+
+    fn validate_record_type<T: Any>(&self, record: EntityRecord) -> bool {
+        let bucket = match self.find_type_storage_bucket::<T>() {
+            Some(bucket) => bucket,
+            None => return false,
+        };
+        let bucket_id = unsafe { self.entity_table.bucket_index(&bucket) };
+        bucket_id == record.bucket_id
+    }
+
     /// Add a new value into the repository.
     /// Returning a pointer handle to this value.
     pub fn insert<T: Any>(&mut self, v: T) -> EntityPtr<T> {
@@ -186,6 +244,7 @@ struct EntityStorage {
     type_id: TypeId,
     type_layout: Layout,
     type_drop: fn(slab::ErasedSlab),
+    type_reattach_vacant: fn(&mut slab::ErasedSlab, usize) -> Result<(), slab::EntryError>,
     type_data: slab::ErasedSlab,
 }
 
@@ -207,6 +266,12 @@ impl EntityStorage {
             type_layout: Layout::new::<T>(),
             type_drop: |erased_slab| {
                 let _ = unsafe { Slab::<EntityStorageEntry<T>>::from_erased_slab(erased_slab) };
+            },
+            type_reattach_vacant: |erased_slab, index| {
+                let mut slab = unsafe { ManuallyDrop::new(Slab::<EntityStorageEntry<T>>::from_erased_slab(*erased_slab)) };
+                let result = slab.reattach_vacant(index);
+                *erased_slab = ManuallyDrop::into_inner(slab).into_erased_slab();
+                result
             },
             type_data: Slab::<EntityStorageEntry<T>>::new().into_erased_slab(),
         }
@@ -244,19 +309,19 @@ impl EntityStorage {
 
     unsafe fn raw_slab<T: Any>(
         &self,
-    ) -> Result<ManuallyDrop<slab::Slab<EntityStorageEntry<T>>>, Error> {
+    ) -> Result<ManuallyDrop<Slab<EntityStorageEntry<T>>>, Error> {
         let type_id = TypeId::of::<T>();
         if self.type_id != type_id {
             return Err(Error::InvalidPtr);
         }
         debug_assert_eq!(self.type_layout, Layout::new::<T>());
-        Ok(ManuallyDrop::new(slab::Slab::from_erased_slab(
+        Ok(ManuallyDrop::new(Slab::from_erased_slab(
             self.type_data,
         )))
     }
     unsafe fn finish_raw_slab<T: Any>(
         &mut self,
-        slab: ManuallyDrop<slab::Slab<EntityStorageEntry<T>>>,
+        slab: ManuallyDrop<Slab<EntityStorageEntry<T>>>,
     ) -> Result<(), Error> {
         let type_id = TypeId::of::<T>();
         if self.type_id != type_id {
@@ -265,6 +330,10 @@ impl EntityStorage {
         debug_assert_eq!(self.type_layout, Layout::new::<T>());
         self.type_data = ManuallyDrop::into_inner(slab).into_erased_slab();
         Ok(())
+    }
+
+    fn untyped_reattach_vacant(&mut self, storage_idx: usize) -> Result<(), slab::EntryError> {
+        (self.type_reattach_vacant)(&mut self.type_data, storage_idx)
     }
 }
 
@@ -304,20 +373,48 @@ impl<'a, T: Any> EntityStorageViewMut<'a, T> {
         slab.is_occupied(v)
     }
 
+    fn preallocate(&mut self) -> usize {
+        let mut slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        let storage_idx = slab.detach_vacant();
+        unsafe { self.storage.finish_raw_slab(slab).unwrap() };
+        storage_idx
+    }
+
     fn insert(&mut self, data: T) -> (usize, usize) {
         let mut slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
         let entity_id = self.catalog.detach_vacant();
         let entry = EntityStorageEntry { data, entity_id };
         let storage_idx = slab.push(entry);
-        self.catalog.occupy_vacant(
+        self.catalog.occupy_detached_vacant(
             entity_id,
             EntityRecord {
                 bucket_id: self.bucket_id,
                 storage_idx,
             },
-        );
+        ).unwrap();
         unsafe { self.storage.finish_raw_slab(slab).unwrap() };
         (storage_idx, entity_id)
+    }
+
+    fn is_preallocated(&self, storage_idx: usize) -> bool {
+        let slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        slab.is_detached_vacant(storage_idx)
+    }
+
+    fn init_preallocated(&mut self, storage_idx: usize, data: T) -> usize {
+        let mut slab = unsafe { self.storage.raw_slab::<T>().unwrap() };
+        let entity_id = self.catalog.detach_vacant();
+        let entry = EntityStorageEntry { data, entity_id };
+        slab.occupy_detached_vacant(storage_idx, entry).unwrap();
+        self.catalog.occupy_detached_vacant(
+            entity_id,
+            EntityRecord {
+                bucket_id: self.bucket_id,
+                storage_idx,
+            },
+        ).unwrap();
+        unsafe { self.storage.finish_raw_slab(slab).unwrap() };
+        entity_id
     }
 
     fn remove(&mut self, storage_idx: usize) -> Option<T> {
@@ -530,7 +627,7 @@ impl<T: Any, R> EntityPtr<T, R> {
     pub fn cast_repo<R2>(self) -> EntityPtr<T, R2> {
         EntityPtr {
             record: self.record,
-            phantom: PhantomData
+            phantom: PhantomData,
         }
     }
 }
