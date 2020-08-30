@@ -41,10 +41,10 @@
 #![deny(warnings, missing_docs, missing_debug_implementations)]
 //! A special kind of arena that can support storing multiple data types.
 //!
-//! `Repository` provides storage for multiple data types, it provides
+//! `Repo` provides storage for multiple data types, it provides
 //! its own kind of index handle called `EntityId` and its own kind of typed
 //! handle called `EntityPtr<T>`. With these handles it allows the values
-//! resident in the same `Repository` to reference each other easily.
+//! resident in the same `Repo` to reference each other easily.
 //!
 //! The data behind the `EntityPtr<T>` handle can be accessed when you have
 //! a corresponding reference to the whole repository.
