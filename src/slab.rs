@@ -148,7 +148,11 @@ impl<T> Slab<T> {
         }
     }
 
-    pub(crate) fn occupy_detached_vacant(&mut self, index: usize, value: T) -> Result<(), EntryError> {
+    pub(crate) fn occupy_detached_vacant(
+        &mut self,
+        index: usize,
+        value: T,
+    ) -> Result<(), EntryError> {
         let e = match self.items.get_mut(index) {
             Some(e) => e,
             None => return Err(EntryError::InvalidIdx),
@@ -195,9 +199,8 @@ impl ErasedSlab {
     #[allow(unused_unsafe)]
     pub(crate) unsafe fn index<'a, T>(self, index: usize) -> &'a T {
         use core::slice;
-        let slice = unsafe {
-            slice::from_raw_parts(self.data_ptr as *const Entry<T>, self.data_len)
-        };
+        let slice =
+            unsafe { slice::from_raw_parts(self.data_ptr as *const Entry<T>, self.data_len) };
         match &slice[index] {
             Entry::Occupied(v) => v,
             _ => unreachable!(),
@@ -207,9 +210,8 @@ impl ErasedSlab {
     #[allow(unused_unsafe)]
     pub(crate) unsafe fn index_mut<'a, T>(self, index: usize) -> &'a mut T {
         use core::slice;
-        let slice = unsafe {
-            slice::from_raw_parts_mut(self.data_ptr as *mut Entry<T>, self.data_len)
-        };
+        let slice =
+            unsafe { slice::from_raw_parts_mut(self.data_ptr as *mut Entry<T>, self.data_len) };
         match &mut slice[index] {
             Entry::Occupied(v) => v,
             _ => unreachable!(),
