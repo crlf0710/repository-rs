@@ -1,12 +1,22 @@
 [package]
 name = "repository"
-version = "0.0.2"
+version = "0.1.0"
 authors = ["Charles Lew <crlf0710@gmail.com>"]
 license = "MIT OR Apache-2.0"
-edition = "2018"
+edition = "2021"
 description = "A repository for all kinds of entities."
 repository = "https://github.com/crlf0710/repository-rs"
 
+[lib]
+name = "repo"
+
+[features]
+keyed = []
+
 [dependencies]
-hashbrown = {version = "0.9.0", features = ['raw']}
-thiserror = "1.0.20"
+repository-macros = {version = "0.1.0", path = "repository-macros"}
+elsa = "1.7.0"
+indexmap = "1.9.1"
+
+[workspace]
+members = ["repository-macros"]
