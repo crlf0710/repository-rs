@@ -155,6 +155,11 @@ pub mod keyed_value {
     }
 }
 
+pub mod error {
+    #[derive(Clone, Copy, Debug)]
+    pub struct ComponentNotPresent;
+}
+
 pub mod repo {
     use crate::component::Component;
     use crate::id::Id;
@@ -172,10 +177,7 @@ pub mod repo {
 
         fn storage_mut(&mut self) -> &mut Storage<Self>;
 
-        fn create_component_lists_storage(
-            repo_id: Id,
-            routes: &mut Routes<Self>,
-        ) -> Self::ComponentListsStorage;
+        fn create_component_lists_storage(repo_id: Id) -> Self::ComponentListsStorage;
 
         fn repo_id(&self) -> Id {
             self.storage().repo_id
@@ -192,19 +194,16 @@ pub mod repo {
     pub struct Storage<R: Repo> {
         repo_id: Id,
         parent_repo_id: Option<Id>,
-        routes: Routes<R>,
         pub component_lists_storage: <R as Repo>::ComponentListsStorage,
     }
 
     impl<R: Repo> Default for Storage<R> {
         fn default() -> Self {
             let repo_id = allocate_repo_id().unwrap();
-            let mut routes = Routes::default();
-            let component_lists_storage = R::create_component_lists_storage(repo_id, &mut routes);
+            let component_lists_storage = R::create_component_lists_storage(repo_id);
             Storage {
                 repo_id,
                 parent_repo_id: None,
-                routes,
                 component_lists_storage,
             }
         }
@@ -215,24 +214,11 @@ pub mod repo {
     pub type DynRoute<R: Repo> = dyn Fn(&R) -> (&dyn Component<R>) + Send + Sync;
 
     pub type DynMutRoute<R: Repo> = dyn Fn(&mut R) -> (&mut dyn Component<R>) + Send + Sync;
-
-    pub struct Routes<R: Repo> {
-        routes: Vec<(Box<DynRoute<R>>, Box<DynMutRoute<R>>)>,
-    }
-
-    impl<R: Repo> Default for Routes<R> {
-        fn default() -> Self {
-            Self {
-                routes: Default::default(),
-            }
-        }
-    }
 }
 
 pub mod component {
     use crate::id::Id;
     use crate::repo::Repo;
-    use crate::repo::Routes;
 
     pub trait HasComponentList<CL>
     where
@@ -245,10 +231,7 @@ pub mod component {
     pub trait ComponentList {
         type ComponentListDef;
 
-        fn create_component_list<R: Repo>(
-            repo_id: Id,
-            routes: &mut Routes<R>,
-        ) -> Self::ComponentListDef;
+        fn create_component_list<R: Repo>(repo_id: Id) -> Self::ComponentListDef;
     }
 
     pub trait HasComponent<C>: Repo
@@ -276,6 +259,7 @@ pub mod component_storage {
     use crate::id::Id;
     use crate::repo::KIOSK;
     use indexmap::IndexSet;
+    use std::collections::BTreeMap;
     use std::hash::Hash;
     use std::num::NonZeroUsize;
 
@@ -366,6 +350,95 @@ pub mod component_storage {
             self.inner.get(id)
         }
     }
+
+    pub struct DenseStorage<D> {
+        data: Vec<D>,
+    }
+
+    impl<D> DenseStorage<D> {
+        pub fn new() -> Self {
+            DenseStorage { data: Vec::new() }
+        }
+
+        #[inline]
+        pub fn get(&self, id: Id) -> &D {
+            self.data.get((id.0.get() - 1)).unwrap()
+        }
+
+        #[inline]
+        pub fn get_mut(&mut self, id: Id) -> &mut D {
+            self.data.get_mut((id.0.get() - 1)).unwrap()
+        }
+
+        #[inline]
+        pub fn append(&mut self, id: Id, d: D) {
+            let idx = id.0.get() - 1;
+            assert_eq!(idx, self.data.len());
+            self.data.push(d);
+        }
+    }
+
+    pub struct SparseStorage<D> {
+        data: BTreeMap<usize, D>,
+    }
+
+    impl<D> SparseStorage<D> {
+        pub fn new() -> Self {
+            SparseStorage {
+                data: BTreeMap::new(),
+            }
+        }
+        #[inline]
+        pub fn get(&self, id: Id) -> Option<&D> {
+            self.data.get(&(id.0.get() - 1))
+        }
+
+        #[inline]
+        pub fn get_mut(&mut self, id: Id) -> Option<&mut D> {
+            self.data.get_mut(&(id.0.get() - 1))
+        }
+
+        #[inline]
+        pub fn append(&mut self, id: Id, d: D) {
+            use std::collections::btree_map::Entry;
+            let entry = self.data.entry(id.0.get() - 1);
+            if matches!(entry, Entry::Occupied(..)) {
+                unreachable!();
+            }
+            entry.or_insert(d);
+        }
+    }
+
+    pub struct DenseStorageWithId<D> {
+        kiosk_entry: Id,
+        inner: DenseStorage<D>,
+    }
+
+    impl<D> DenseStorageWithId<D> {
+        pub fn new(kiosk_entry: Id) -> Self {
+            DenseStorageWithId {
+                kiosk_entry,
+                inner: DenseStorage::new(),
+            }
+        }
+
+        #[inline]
+        pub fn allocate_next(&mut self, d: D) -> Id {
+            let next_id = KIOSK
+                .with(|kiosk| {
+                    let entry = kiosk.entry_with_id(self.kiosk_entry);
+                    entry.allocate()
+                })
+                .unwrap();
+            self.append(next_id, d);
+            next_id
+        }
+
+        #[inline]
+        pub fn append(&mut self, id: Id, d: D) {
+            self.inner.append(id, d);
+        }
+    }
 }
 
 pub mod interned {
@@ -382,18 +455,17 @@ pub mod interned {
         const SHARING_BETWEEN_REPOS: bool;
     }
 
-    /*
-    fn allocate_sharing_interned_id<T: Interned>() -> Option<Id> {
-        assert!(T::SHARING_BETWEEN_REPOS);
-        KIOSK.with(|kiosk| {
-            let entry = kiosk.entry_with_path([
-                INTERNED_KIOSK_SELECTOR,
-                KioskSelector::TypeId(TypeId::of::<T>()),
-            ]);
-            entry.allocate()
-        })
+    pub fn kiosk_sharing_interned_entry<T: Interned>() -> Id {
+        assert!(!T::SHARING_BETWEEN_REPOS);
+        KIOSK
+            .with(|kiosk| {
+                kiosk.entry_id_with_path([
+                    INTERNED_KIOSK_SELECTOR,
+                    KioskSelector::TypeId(TypeId::of::<T>()),
+                ])
+            })
+            .unwrap()
     }
-    */
 
     pub fn kiosk_nonsharing_interned_entry<T: Interned>(repo_id: Id) -> Id {
         assert!(!T::SHARING_BETWEEN_REPOS);
@@ -408,24 +480,9 @@ pub mod interned {
             })
             .unwrap()
     }
-
-    /*
-    fn allocate_nonsharing_interned_id<T: Interned>(repo_id: Id) -> Option<Id> {
-        assert!(!T::SHARING_BETWEEN_REPOS);
-        KIOSK.with(|kiosk| {
-            let entry = kiosk.entry_with_path([
-                REPO_KIOSK_SELECTOR,
-                KioskSelector::Id(repo_id),
-                INTERNED_KIOSK_SELECTOR,
-                KioskSelector::TypeId(TypeId::of::<T>()),
-            ]);
-            entry.allocate()
-        })
-    }
-    */
 }
 
-mod entity {
+pub mod entity {
     use std::any::Any;
     use std::any::TypeId;
 
@@ -436,18 +493,19 @@ mod entity {
 
     const ENTITY_KIOSK_SELECTOR: KioskSelector = KioskSelector::Token("entity");
 
-    trait Entity: Any + Sized {}
+    pub trait Entity: Any + Sized {}
 
-    fn allocate_entity_id<T: Entity>(repo_id: Id) -> Option<Id> {
-        KIOSK.with(|kiosk| {
-            let entry = kiosk.entry_with_path([
-                REPO_KIOSK_SELECTOR,
-                KioskSelector::Id(repo_id),
-                ENTITY_KIOSK_SELECTOR,
-                KioskSelector::TypeId(TypeId::of::<T>()),
-            ]);
-            entry.allocate()
-        })
+    pub fn kiosk_entity_entry<T: Entity>(repo_id: Id) -> Id {
+        KIOSK
+            .with(|kiosk| {
+                kiosk.entry_id_with_path([
+                    REPO_KIOSK_SELECTOR,
+                    KioskSelector::Id(repo_id),
+                    ENTITY_KIOSK_SELECTOR,
+                    KioskSelector::TypeId(TypeId::of::<T>()),
+                ])
+            })
+            .unwrap()
     }
 }
 

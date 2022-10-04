@@ -102,8 +102,8 @@ delegate_single_fn_impl! {
     ItemStructOrEnumOrUnion => self.borrow().to_tokens(tokens),
 }
 
-impl ItemAdtRef<'_> {
-    pub(crate) fn name(&self) -> syn::Ident {
+impl<'a> ItemAdtRef<'a> {
+    pub(crate) fn name(self) -> syn::Ident {
         match self {
             ItemAdtRef::Struct(syn::ItemStruct { ident, .. })
             | ItemAdtRef::Enum(syn::ItemEnum { ident, .. })
@@ -111,11 +111,29 @@ impl ItemAdtRef<'_> {
         }
     }
 
-    pub(crate) fn vis(&self) -> syn::Visibility {
+    pub(crate) fn vis(self) -> syn::Visibility {
         match self {
             ItemAdtRef::Struct(syn::ItemStruct { vis, .. })
             | ItemAdtRef::Enum(syn::ItemEnum { vis, .. })
             | ItemAdtRef::Union(syn::ItemUnion { vis, .. }) => vis.clone(),
+        }
+    }
+
+    pub(crate) fn attrs(self) -> &'a Vec<syn::Attribute> {
+        match self {
+            ItemAdtRef::Struct(syn::ItemStruct { attrs, .. })
+            | ItemAdtRef::Enum(syn::ItemEnum { attrs, .. })
+            | ItemAdtRef::Union(syn::ItemUnion { attrs, .. }) => attrs,
+        }
+    }
+}
+
+impl<'a> ItemAdtMutRef<'a> {
+    pub(crate) fn attrs_mut(self) -> &'a mut Vec<syn::Attribute> {
+        match self {
+            ItemAdtMutRef::Struct(syn::ItemStruct { attrs, .. })
+            | ItemAdtMutRef::Enum(syn::ItemEnum { attrs, .. })
+            | ItemAdtMutRef::Union(syn::ItemUnion { attrs, .. }) => attrs,
         }
     }
 }
@@ -131,6 +149,23 @@ delegate_single_fn_impl! {
 
 delegate_single_fn_impl! {
     inherent;
+    pub(crate) fn attrs(&self) -> &Vec<syn::Attribute>;
+    ItemAdtMutRef<'_> => self.borrow().attrs(),
+    ItemStructOnly => self.borrow().attrs(),
+    ItemStructOrEnum => self.borrow().attrs(),
+    ItemStructOrEnumOrUnion => self.borrow().attrs(),
+}
+
+delegate_single_fn_impl! {
+    inherent;
+    pub(crate) fn attrs_mut(&mut self) -> &mut Vec<syn::Attribute>;
+    ItemStructOnly => self.borrow_mut().attrs_mut(),
+    ItemStructOrEnum => self.borrow_mut().attrs_mut(),
+    ItemStructOrEnumOrUnion => self.borrow_mut ().attrs_mut(),
+}
+
+delegate_single_fn_impl! {
+    inherent;
     pub(crate) fn vis(&self) -> syn::Visibility;
     ItemAdtMutRef<'_> => self.borrow().vis(),
     ItemStructOnly => self.borrow().vis(),
@@ -138,37 +173,11 @@ delegate_single_fn_impl! {
     ItemStructOrEnumOrUnion => self.borrow().vis(),
 }
 
-impl<'a> ItemAdtMutRef<'a> {
-    pub(crate) fn take_attr_with_ident_name(
-        self,
-        ident_name: &str,
-    ) -> impl Iterator<Item = syn::Attribute> + 'a {
-        match self {
-            ItemAdtMutRef::Struct(syn::ItemStruct { attrs, .. })
-            | ItemAdtMutRef::Enum(syn::ItemEnum { attrs, .. })
-            | ItemAdtMutRef::Union(syn::ItemUnion { attrs, .. }) => {
-                attrs.retain_or_take(|attr| !attr.path.is_ident(ident_name))
-            }
-        }
-    }
-
-    pub(crate) fn append_attrs(self, new_attrs: impl IntoIterator<Item = syn::Attribute>) {
-        match self {
-            ItemAdtMutRef::Struct(syn::ItemStruct { attrs, .. })
-            | ItemAdtMutRef::Enum(syn::ItemEnum { attrs, .. })
-            | ItemAdtMutRef::Union(syn::ItemUnion { attrs, .. }) => {
-                attrs.extend(new_attrs.into_iter())
-            }
-        }
-    }
-}
-
-delegate_single_fn_impl! {
-    inherent;
-    pub(crate) fn take_attr_with_ident_name(&mut self, ident_name: &str) -> impl Iterator<Item = syn::Attribute> + '_;
-    ItemStructOnly => self.borrow_mut().take_attr_with_ident_name(ident_name),
-    ItemStructOrEnum => self.borrow_mut().take_attr_with_ident_name(ident_name),
-    ItemStructOrEnumOrUnion => self.borrow_mut ().take_attr_with_ident_name(ident_name),
+pub(crate) fn attrs_take_with_ident_name<'a>(
+    attrs: &'a mut Vec<syn::Attribute>,
+    ident_name: &str,
+) -> impl Iterator<Item = syn::Attribute> + 'a {
+    attrs.retain_or_take(|attr| !attr.path.is_ident(ident_name))
 }
 
 #[derive(Debug)]
@@ -183,13 +192,15 @@ pub(crate) struct GeneralizedField {
 pub(crate) enum GeneralizedFieldFlags {
     None,
     Getter,
+    Setter,
+    GetterAndSetter,
 }
 
 impl GeneralizedField {
     pub(crate) fn new_from_syn_field(
         field: &mut syn::Field,
         index_in_first_applicable_variant: usize,
-        in_union: bool,
+        flags: GeneralizedFieldFlags,
     ) -> syn::Result<Self> {
         let accessor = field
             .attrs
@@ -205,11 +216,7 @@ impl GeneralizedField {
             field: field.clone(),
             indexes_in_applicable_variants: vec![index_in_first_applicable_variant],
             accessor: accessor.map(IdentPair::from_snake_case_ident),
-            flags: if !in_union {
-                GeneralizedFieldFlags::Getter
-            } else {
-                GeneralizedFieldFlags::None
-            },
+            flags,
         };
         Ok(field)
     }
@@ -220,8 +227,15 @@ impl GeneralizedField {
 
     pub(crate) fn has_getter(&self) -> bool {
         match self.flags {
-            GeneralizedFieldFlags::Getter => true,
-            GeneralizedFieldFlags::None => false,
+            GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => true,
+            GeneralizedFieldFlags::None | GeneralizedFieldFlags::Setter => false,
+        }
+    }
+
+    pub(crate) fn has_setter(&self) -> bool {
+        match self.flags {
+            GeneralizedFieldFlags::Setter | GeneralizedFieldFlags::GetterAndSetter => true,
+            GeneralizedFieldFlags::None | GeneralizedFieldFlags::Getter => false,
         }
     }
 }
@@ -318,7 +332,7 @@ macro_rules! unwrap_result_in_macro {
 macro_rules! validate_name_in_macro {
     ($i:expr) => {
         ensure_in_macro!(
-            !$i.to_string().contains('_'),
+            !$i.ident_text().contains('_'),
             $i.span(),
             "cannot use underscore in name"
         );
@@ -327,7 +341,25 @@ macro_rules! validate_name_in_macro {
 
 macro_rules! ident_from_combining {
     ($span:expr => $a:expr, $b:expr) => {
-        syn::Ident::new(&format!("{}_{}", $a, $b), $span)
+        syn::Ident::new_raw(
+            &format!(
+                "{}_{}",
+                IdentText::ident_text(&$a),
+                IdentText::ident_text(&$b)
+            ),
+            $span,
+        )
+    };
+    ($span:expr => $a:expr, $b:expr, $c:expr) => {
+        syn::Ident::new_raw(
+            &format!(
+                "{}_{}_{}",
+                IdentText::ident_text(&$a),
+                IdentText::ident_text(&$b),
+                IdentText::ident_text(&$c)
+            ),
+            $span,
+        )
     };
 }
 
@@ -681,7 +713,7 @@ impl syn::parse::Parse for AttributeArgs {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct IdentPair {
     pub(crate) snake_case: String,
     pub(crate) camel_case: String,
@@ -691,7 +723,7 @@ pub(crate) struct IdentPair {
 impl IdentPair {
     pub(crate) fn from_snake_case_ident(i: syn::Ident) -> Self {
         use heck::ToUpperCamelCase;
-        let snake_case = i.to_string();
+        let snake_case = i.ident_text();
         let camel_case = snake_case.to_upper_camel_case();
         IdentPair {
             snake_case,
@@ -702,7 +734,7 @@ impl IdentPair {
 
     pub(crate) fn from_camel_case_ident(i: syn::Ident) -> Self {
         use heck::ToSnakeCase;
-        let camel_case = i.to_string();
+        let camel_case = i.ident_text();
         let snake_case = camel_case.to_snake_case();
         IdentPair {
             snake_case,
@@ -711,7 +743,116 @@ impl IdentPair {
         }
     }
 
+    pub(crate) fn span(&self) -> proc_macro2::Span {
+        self.span.clone()
+    }
+
     pub(crate) fn snake_case_ident(&self) -> syn::Ident {
         syn::Ident::new_raw(&self.snake_case, self.span)
+    }
+
+    pub(crate) fn camel_case_ident(&self) -> syn::Ident {
+        syn::Ident::new_raw(&self.camel_case, self.span)
+    }
+
+    pub(crate) fn eq_camel_case_ident(&self, i: &syn::Ident) -> bool {
+        self.camel_case == i.ident_text()
+    }
+}
+
+pub(crate) trait IdentText {
+    fn ident_text(&self) -> String;
+}
+
+impl IdentText for syn::Ident {
+    fn ident_text(&self) -> String {
+        let s = self.to_string();
+        if let Some(s) = s.strip_prefix("r#") {
+            s.to_owned()
+        } else {
+            s
+        }
+    }
+}
+
+impl IdentText for str {
+    fn ident_text(&self) -> String {
+        self.to_owned()
+    }
+}
+
+impl IdentText for String {
+    fn ident_text(&self) -> String {
+        self.clone()
+    }
+}
+
+impl<T> IdentText for &'_ T
+where
+    T: IdentText + ?Sized,
+{
+    fn ident_text(&self) -> String {
+        (**self).ident_text()
+    }
+}
+
+impl<T> IdentText for &'_ mut T
+where
+    T: IdentText + ?Sized,
+{
+    fn ident_text(&self) -> String {
+        (**self).ident_text()
+    }
+}
+
+pub(crate) trait TyWrap {
+    fn wrap_ty_with_option(self) -> Self;
+    fn wrap_ty_with_result(self, error_ty: Self) -> Self;
+}
+
+impl TyWrap for syn::Type {
+    fn wrap_ty_with_option(self) -> Self {
+        syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path {
+                leading_colon: None,
+                segments: syn::punctuated::Punctuated::from_iter(vec![syn::PathSegment {
+                    ident: syn::Ident::new("Option", self.span()),
+                    arguments: syn::PathArguments::AngleBracketed(
+                        syn::AngleBracketedGenericArguments {
+                            colon2_token: Default::default(),
+                            lt_token: Default::default(),
+                            args: syn::punctuated::Punctuated::from_iter(vec![
+                                syn::GenericArgument::Type(self),
+                            ]),
+                            gt_token: Default::default(),
+                        },
+                    ),
+                }]),
+            },
+        })
+    }
+
+    fn wrap_ty_with_result(self, error_ty: Self) -> Self {
+        syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path {
+                leading_colon: None,
+                segments: syn::punctuated::Punctuated::from_iter(vec![syn::PathSegment {
+                    ident: syn::Ident::new("Result", self.span()),
+                    arguments: syn::PathArguments::AngleBracketed(
+                        syn::AngleBracketedGenericArguments {
+                            colon2_token: Default::default(),
+                            lt_token: Default::default(),
+                            args: syn::punctuated::Punctuated::from_iter(vec![
+                                syn::GenericArgument::Type(self),
+                                syn::GenericArgument::Type(error_ty),
+                            ]),
+                            gt_token: Default::default(),
+                        },
+                    ),
+                }]),
+            },
+        })
     }
 }
