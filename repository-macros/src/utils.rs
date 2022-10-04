@@ -56,191 +56,7 @@ macro_rules! delegate_single_fn_impl {
     };
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum ItemAdtRef<'a> {
-    Struct(&'a syn::ItemStruct),
-    Enum(&'a syn::ItemEnum),
-    Union(&'a syn::ItemUnion),
-}
-
-pub(crate) enum ItemAdtMutRef<'a> {
-    Struct(&'a mut syn::ItemStruct),
-    Enum(&'a mut syn::ItemEnum),
-    Union(&'a mut syn::ItemUnion),
-}
-
-impl ItemAdtMutRef<'_> {
-    fn borrow(&self) -> ItemAdtRef<'_> {
-        match self {
-            ItemAdtMutRef::Struct(i) => ItemAdtRef::Struct(i),
-            ItemAdtMutRef::Enum(i) => ItemAdtRef::Enum(i),
-            ItemAdtMutRef::Union(i) => ItemAdtRef::Union(i),
-        }
-    }
-}
-
-mod adt;
-
-pub(crate) use adt::{ItemStructOnly, ItemStructOrEnum, ItemStructOrEnumOrUnion};
-
-impl quote::ToTokens for ItemAdtRef<'_> {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        match self {
-            ItemAdtRef::Struct(i) => i.to_tokens(tokens),
-            ItemAdtRef::Enum(i) => i.to_tokens(tokens),
-            ItemAdtRef::Union(i) => i.to_tokens(tokens),
-        }
-    }
-}
-
-delegate_single_fn_impl! {
-    of quote::ToTokens;
-    fn to_tokens(&self, tokens: &mut TokenStream2);
-    ItemAdtMutRef<'_> => self.borrow().to_tokens(tokens),
-    ItemStructOnly => self.borrow().to_tokens(tokens),
-    ItemStructOrEnum => self.borrow().to_tokens(tokens),
-    ItemStructOrEnumOrUnion => self.borrow().to_tokens(tokens),
-}
-
-impl<'a> ItemAdtRef<'a> {
-    pub(crate) fn name(self) -> syn::Ident {
-        match self {
-            ItemAdtRef::Struct(syn::ItemStruct { ident, .. })
-            | ItemAdtRef::Enum(syn::ItemEnum { ident, .. })
-            | ItemAdtRef::Union(syn::ItemUnion { ident, .. }) => ident.clone(),
-        }
-    }
-
-    pub(crate) fn vis(self) -> syn::Visibility {
-        match self {
-            ItemAdtRef::Struct(syn::ItemStruct { vis, .. })
-            | ItemAdtRef::Enum(syn::ItemEnum { vis, .. })
-            | ItemAdtRef::Union(syn::ItemUnion { vis, .. }) => vis.clone(),
-        }
-    }
-
-    pub(crate) fn attrs(self) -> &'a Vec<syn::Attribute> {
-        match self {
-            ItemAdtRef::Struct(syn::ItemStruct { attrs, .. })
-            | ItemAdtRef::Enum(syn::ItemEnum { attrs, .. })
-            | ItemAdtRef::Union(syn::ItemUnion { attrs, .. }) => attrs,
-        }
-    }
-}
-
-impl<'a> ItemAdtMutRef<'a> {
-    pub(crate) fn attrs_mut(self) -> &'a mut Vec<syn::Attribute> {
-        match self {
-            ItemAdtMutRef::Struct(syn::ItemStruct { attrs, .. })
-            | ItemAdtMutRef::Enum(syn::ItemEnum { attrs, .. })
-            | ItemAdtMutRef::Union(syn::ItemUnion { attrs, .. }) => attrs,
-        }
-    }
-}
-
-delegate_single_fn_impl! {
-    inherent;
-    pub(crate) fn name(&self) -> syn::Ident;
-    ItemAdtMutRef<'_> => self.borrow().name(),
-    ItemStructOnly => self.borrow().name(),
-    ItemStructOrEnum => self.borrow().name(),
-    ItemStructOrEnumOrUnion => self.borrow().name(),
-}
-
-delegate_single_fn_impl! {
-    inherent;
-    pub(crate) fn attrs(&self) -> &Vec<syn::Attribute>;
-    ItemAdtMutRef<'_> => self.borrow().attrs(),
-    ItemStructOnly => self.borrow().attrs(),
-    ItemStructOrEnum => self.borrow().attrs(),
-    ItemStructOrEnumOrUnion => self.borrow().attrs(),
-}
-
-delegate_single_fn_impl! {
-    inherent;
-    pub(crate) fn attrs_mut(&mut self) -> &mut Vec<syn::Attribute>;
-    ItemStructOnly => self.borrow_mut().attrs_mut(),
-    ItemStructOrEnum => self.borrow_mut().attrs_mut(),
-    ItemStructOrEnumOrUnion => self.borrow_mut ().attrs_mut(),
-}
-
-delegate_single_fn_impl! {
-    inherent;
-    pub(crate) fn vis(&self) -> syn::Visibility;
-    ItemAdtMutRef<'_> => self.borrow().vis(),
-    ItemStructOnly => self.borrow().vis(),
-    ItemStructOrEnum => self.borrow().vis(),
-    ItemStructOrEnumOrUnion => self.borrow().vis(),
-}
-
-pub(crate) fn attrs_take_with_ident_name<'a>(
-    attrs: &'a mut Vec<syn::Attribute>,
-    ident_name: &str,
-) -> impl Iterator<Item = syn::Attribute> + 'a {
-    attrs.retain_or_take(|attr| !attr.path.is_ident(ident_name))
-}
-
-#[derive(Debug)]
-pub(crate) struct GeneralizedField {
-    pub(crate) field: syn::Field,
-    pub(crate) accessor: Option<IdentPair>,
-    pub(crate) indexes_in_applicable_variants: Vec<usize>,
-    pub(crate) flags: GeneralizedFieldFlags,
-}
-
-#[derive(Debug)]
-pub(crate) enum GeneralizedFieldFlags {
-    None,
-    Getter,
-    Setter,
-    GetterAndSetter,
-}
-
-impl GeneralizedField {
-    pub(crate) fn new_from_syn_field(
-        field: &mut syn::Field,
-        index_in_first_applicable_variant: usize,
-        flags: GeneralizedFieldFlags,
-    ) -> syn::Result<Self> {
-        let accessor = field
-            .attrs
-            .retain_or_take(|attr| !attr.path.is_ident("accessor"))
-            .map(|x| GeneralizedMeta::parse_attribute(&x).and_then(|x| x.get_ident_value()))
-            .collect::<syn::Result<Vec<_>>>()?;
-        let accessor = match &accessor[..] {
-            [] => None,
-            [x] => Some(x.clone()),
-            [x, y, ..] => return Err(syn::Error::new(y.span(), "multiple accessor specified")),
-        };
-        let field = GeneralizedField {
-            field: field.clone(),
-            indexes_in_applicable_variants: vec![index_in_first_applicable_variant],
-            accessor: accessor.map(IdentPair::from_snake_case_ident),
-            flags,
-        };
-        Ok(field)
-    }
-
-    pub(crate) fn vis(&self) -> syn::Visibility {
-        self.field.vis.clone()
-    }
-
-    pub(crate) fn has_getter(&self) -> bool {
-        match self.flags {
-            GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => true,
-            GeneralizedFieldFlags::None | GeneralizedFieldFlags::Setter => false,
-        }
-    }
-
-    pub(crate) fn has_setter(&self) -> bool {
-        match self.flags {
-            GeneralizedFieldFlags::Setter | GeneralizedFieldFlags::GetterAndSetter => true,
-            GeneralizedFieldFlags::None | GeneralizedFieldFlags::Getter => false,
-        }
-    }
-}
-
-trait RetainOrTake<T> {
+pub(crate) trait RetainOrTake<T> {
     type Drain<'a>
     where
         Self: 'a;
@@ -344,8 +160,8 @@ macro_rules! ident_from_combining {
         syn::Ident::new_raw(
             &format!(
                 "{}_{}",
-                IdentText::ident_text(&$a),
-                IdentText::ident_text(&$b)
+                crate::utils::IdentText::ident_text(&$a),
+                crate::utils::IdentText::ident_text(&$b)
             ),
             $span,
         )
@@ -354,9 +170,9 @@ macro_rules! ident_from_combining {
         syn::Ident::new_raw(
             &format!(
                 "{}_{}_{}",
-                IdentText::ident_text(&$a),
-                IdentText::ident_text(&$b),
-                IdentText::ident_text(&$c)
+                crate::utils::IdentText::ident_text(&$a),
+                crate::utils::IdentText::ident_text(&$b),
+                crate::utils::IdentText::ident_text(&$c)
             ),
             $span,
         )

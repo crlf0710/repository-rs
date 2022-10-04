@@ -5,17 +5,19 @@ use crate::utils::IdentText;
 use crate::utils::TyWrap;
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, quote_spanned};
+use quote::quote;
 use syn::{parse::Parse, parse_macro_input, spanned::Spanned};
 
 #[macro_use]
 mod utils;
 
+mod adt;
+
 #[proc_macro_attribute]
 pub fn repo(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as utils::AttributeArgs);
     let option_storage_field = unwrap_result_in_macro!(args.get_ident_with_name("storage_field"));
-    let mut item = parse_macro_input!(item as utils::ItemStructOnly);
+    let mut item = parse_macro_input!(item as adt::ItemStructOnly);
     let option_crate_name = ident_crate_repo(item.span());
     let repo_ident = item.name();
     let storage_field = if let Some(field_name) = &option_storage_field {
@@ -25,12 +27,10 @@ pub fn repo(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     let storage_ty = syn::parse_quote!(#option_crate_name ::repo::Storage<Self>);
     item.append_or_replace_field(storage_field.clone(), storage_ty);
-    let members = unwrap_result_in_macro!(utils::attrs_take_with_ident_name(
-        item.attrs_mut(),
-        "member"
-    )
-    .map(|x| utils::GeneralizedMeta::parse_attribute(&x).and_then(|x| x.get_path_values()))
-    .collect::<Result<Vec<_>, _>>());
+    let members =
+        unwrap_result_in_macro!(adt::attrs_take_with_ident_name(item.attrs_mut(), "member")
+            .map(|x| utils::GeneralizedMeta::parse_attribute(&x).and_then(|x| x.get_path_values()))
+            .collect::<Result<Vec<_>, _>>());
     let members = members
         .into_iter()
         .flat_map(|x| x.into_iter())
@@ -131,341 +131,10 @@ fn attr_allow_non_camel_case_types(span: proc_macro2::Span) -> syn::Attribute {
 }
 
 fn type_unit(span: proc_macro2::Span) -> syn::Type {
-    syn::Type::Tuple(syn::TypeTuple{
+    syn::Type::Tuple(syn::TypeTuple {
         paren_token: Default::default(),
         elems: Default::default(),
     })
-}
-
-#[derive(Debug)]
-struct AdtVariantDefinition {
-    variant_name: Option<utils::IdentPair>,
-    ctor_path: syn::Path,
-    ctor_style: AdtVariantCtorStyle,
-    mandatory_components: Vec<usize>,
-    optional_components: Vec<usize>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum AdtVariantCtorStyle {
-    BraceNamed,
-    ParenUnamed,
-    Unit,
-}
-
-#[derive(Debug)]
-struct AdtComponentDefinition {
-    component_name: utils::IdentPair,
-    is_inherent: bool,
-    is_single_field_group: bool,
-    always_mandatory: bool,
-    applicable_variants: Vec<usize>,
-    fields_named: bool,
-    fields: Vec<utils::GeneralizedField>,
-    field_indexes_in_applicable_variants: Vec<Vec<usize>>,
-}
-
-#[derive(Clone, Copy)]
-enum AdtKind {
-    Interned,
-    Entity,
-}
-
-fn collect_adt_variants_and_components(
-    item: utils::ItemAdtMutRef<'_>,
-    adt_kind: AdtKind,
-    inherent_group_ident: &IdentPair,
-) -> syn::Result<(Vec<AdtVariantDefinition>, Vec<AdtComponentDefinition>)> {
-    use syn::spanned::Spanned;
-    use utils::PushAndGetWithIndex;
-    let item_name = item.name();
-    let mut variant_defs = vec![];
-    let mut comp_defs = vec![];
-    const ENTITY_INHERENT_COMP_IDX: usize = 0;
-    if matches!(adt_kind, AdtKind::Entity) {
-        let (comp_def_idx, comp_def) = comp_defs.push_and_get_with_index(AdtComponentDefinition {
-            component_name: inherent_group_ident.clone(),
-            is_inherent: true,
-            is_single_field_group: false,
-            always_mandatory: true,
-            applicable_variants: Vec::new(),
-            fields_named: true,
-            fields: Vec::new(),
-            field_indexes_in_applicable_variants: Vec::new(),
-        });
-        assert_eq!(comp_def_idx, ENTITY_INHERENT_COMP_IDX);
-    };
-    match item {
-        utils::ItemAdtMutRef::Struct(syn::ItemStruct {
-            ident: item_name,
-            fields,
-            ..
-        }) => {
-            let (variant_def_idx, variant_def) =
-                variant_defs.push_and_get_with_index(AdtVariantDefinition {
-                    variant_name: None,
-                    ctor_path: item_name.clone().into(),
-                    ctor_style: match fields {
-                        syn::Fields::Named(_) => AdtVariantCtorStyle::BraceNamed,
-                        syn::Fields::Unnamed(_) => AdtVariantCtorStyle::ParenUnamed,
-                        syn::Fields::Unit => AdtVariantCtorStyle::Unit,
-                    },
-                    mandatory_components: Vec::new(),
-                    optional_components: Vec::new(),
-                });
-            let mut comp_list_in_variant = Vec::new();
-            let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                ENTITY_INHERENT_COMP_IDX
-            } else {
-                let (comp_def_idx, _) = comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                    component_name: inherent_group_ident.clone(),
-                    is_inherent: true,
-                    is_single_field_group: false,
-                    always_mandatory: true,
-                    applicable_variants: vec![],
-                    fields_named: !matches!(fields, syn::Fields::Unnamed { .. }),
-                    fields: Vec::new(),
-                    field_indexes_in_applicable_variants: vec![],
-                });
-                comp_def_idx
-            };
-            comp_list_in_variant.push(inherent_comp_def_idx);
-            comp_defs[inherent_comp_def_idx]
-                .applicable_variants
-                .push(variant_def_idx);
-            comp_defs[inherent_comp_def_idx]
-                .field_indexes_in_applicable_variants
-                .push(Vec::new());
-            variant_def.mandatory_components.push(inherent_comp_def_idx);
-            for (field_idx, field) in fields.iter_mut().enumerate() {
-                let field_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    todo!("b"); // FIXME
-                } else {
-                    inherent_comp_def_idx
-                };
-                let can_supply_setter = matches!(adt_kind, AdtKind::Entity) && !comp_defs[field_comp_def_idx].is_inherent;
-                comp_defs[field_comp_def_idx].fields.push(
-                    utils::GeneralizedField::new_from_syn_field(field, field_idx, if can_supply_setter {
-                        utils::GeneralizedFieldFlags::GetterAndSetter
-                    } else {
-                        utils::GeneralizedFieldFlags::Getter
-                    })?,
-                );
-            }
-        }
-        utils::ItemAdtMutRef::Enum(syn::ItemEnum {
-            ident: item_name,
-            variants,
-            ..
-        }) => {
-            for variant in variants {
-                if let (AdtKind::Entity, Some((_, e))) = (adt_kind, &variant.discriminant) {
-                    return Err(syn::Error::new(
-                        e.span(),
-                        "enumerate entity cannot specify discriminant",
-                    ));
-                }
-                let (variant_def_idx, variant_def) =
-                    variant_defs.push_and_get_with_index(AdtVariantDefinition {
-                        variant_name: Some(utils::IdentPair::from_camel_case_ident(
-                            variant.ident.clone(),
-                        )),
-                        ctor_path: syn::Path {
-                            leading_colon: None,
-                            segments: syn::punctuated::Punctuated::from_iter(vec![
-                                syn::PathSegment {
-                                    ident: item_name.clone(),
-                                    arguments: syn::PathArguments::None,
-                                },
-                                syn::PathSegment {
-                                    ident: variant.ident.clone(),
-                                    arguments: syn::PathArguments::None,
-                                },
-                            ]),
-                        },
-                        ctor_style: match variant.fields {
-                            syn::Fields::Named(_) => AdtVariantCtorStyle::BraceNamed,
-                            syn::Fields::Unnamed(_) => AdtVariantCtorStyle::ParenUnamed,
-                            syn::Fields::Unit => AdtVariantCtorStyle::Unit,
-                        },
-                        mandatory_components: Vec::new(),
-                        optional_components: Vec::new(),
-                    });
-                let mut comp_list_in_variant = Vec::new();
-                let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    ENTITY_INHERENT_COMP_IDX
-                } else {
-                    let (comp_def_idx, _) =
-                        comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                            component_name: inherent_group_ident.clone(),
-                            is_inherent: true,
-                            is_single_field_group: false,
-                            always_mandatory: true,
-                            applicable_variants: vec![],
-                            fields_named: !matches!(variant.fields, syn::Fields::Unnamed { .. }),
-                            fields: Vec::new(),
-                            field_indexes_in_applicable_variants: vec![],
-                        });
-                    comp_def_idx
-                };
-                comp_list_in_variant.push(inherent_comp_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .applicable_variants
-                    .push(variant_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .field_indexes_in_applicable_variants
-                    .push(Vec::new());
-                variant_def.mandatory_components.push(inherent_comp_def_idx);
-                let variant_fields_named = !matches!(variant.fields, syn::Fields::Unnamed { .. });
-                for (field_idx, field) in variant.fields.iter_mut().enumerate() {
-                    let field_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                        let inherent_attr =
-                            utils::attrs_take_with_ident_name(&mut field.attrs, "inherent")
-                                .collect::<Vec<_>>();
-                        if !inherent_attr.is_empty() {
-                            return Err(syn::Error::new(
-                                inherent_attr[0].span(),
-                                "#[inherent] is not allowd for enums",
-                            ));
-                        } else {
-                            let group_attr =
-                                utils::attrs_take_with_ident_name(&mut field.attrs, "group")
-                                    .collect::<Vec<_>>();
-                            let is_single_field_group = group_attr.is_empty();
-                            let mut existing_comp_idx = None;
-                            let group_comp_name;
-                            if !is_single_field_group {
-                                let group_attr =
-                                    utils::GeneralizedMeta::parse_attribute(&group_attr[0])?;
-                                let group_name = utils::IdentPair::from_snake_case_ident(
-                                    group_attr.get_ident_value()?,
-                                );
-                                group_comp_name = ident_from_combining!(group_name.span() => item_name, group_name.camel_case_ident());
-                                for comp_idx_in_variant in comp_list_in_variant.iter().cloned() {
-                                    if !comp_defs[comp_idx_in_variant].is_single_field_group
-                                        && comp_defs[comp_idx_in_variant]
-                                            .component_name
-                                            .eq_camel_case_ident(&group_comp_name)
-                                    {
-                                        existing_comp_idx = Some(comp_idx_in_variant);
-                                    }
-                                }
-                            } else {
-                                let field_name = if let Some(ident) = field.ident.as_ref() {
-                                    ident.clone()
-                                } else {
-                                    syn::Ident::new_raw(&format!("field{field_idx}"), field.span())
-                                };
-                                let field_name =
-                                    utils::IdentPair::from_snake_case_ident(field_name);
-                                group_comp_name = ident_from_combining!(field_name.span() => item_name, "Field", field_name.camel_case_ident());
-                            }
-                            let comp_def_idx = if let Some(existing_comp_idx) = existing_comp_idx {
-                                existing_comp_idx
-                            } else {
-                                let (comp_def_idx, _) =
-                                    comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                                        component_name: utils::IdentPair::from_camel_case_ident(
-                                            group_comp_name,
-                                        ),
-                                        is_inherent: false,
-                                        is_single_field_group,
-                                        always_mandatory: false,
-                                        applicable_variants: vec![],
-                                        fields_named: variant_fields_named,
-                                        fields: Vec::new(),
-                                        field_indexes_in_applicable_variants: vec![],
-                                    });
-
-                                comp_list_in_variant.push(comp_def_idx);
-                                comp_defs[comp_def_idx]
-                                    .applicable_variants
-                                    .push(variant_def_idx);
-                                comp_defs[comp_def_idx]
-                                    .field_indexes_in_applicable_variants
-                                    .push(Vec::new());
-                                variant_def.mandatory_components.push(comp_def_idx);
-                                comp_def_idx
-                            };
-                            comp_def_idx
-                        }
-                    } else {
-                        inherent_comp_def_idx
-                    };
-                    let can_supply_setter = matches!(adt_kind, AdtKind::Entity) && !comp_defs[field_comp_def_idx].is_inherent;
-                    comp_defs[field_comp_def_idx].fields.push(
-                        utils::GeneralizedField::new_from_syn_field(field, field_idx, if can_supply_setter {
-                            utils::GeneralizedFieldFlags::GetterAndSetter
-                        } else {
-                            utils::GeneralizedFieldFlags::Getter
-                        })?,
-                    );
-                    assert!(
-                        comp_defs[field_comp_def_idx]
-                            .field_indexes_in_applicable_variants
-                            .len()
-                            == 1
-                    );
-                    comp_defs[field_comp_def_idx].field_indexes_in_applicable_variants[0]
-                        .push(field_idx);
-                }
-            }
-        }
-        utils::ItemAdtMutRef::Union(syn::ItemUnion {
-            ident: item_name,
-            fields,
-            ..
-        }) => {
-            for field in &mut fields.named {
-                let variant_name = field
-                    .ident
-                    .clone()
-                    .map(utils::IdentPair::from_snake_case_ident);
-                let (variant_def_idx, variant_def) =
-                    variant_defs.push_and_get_with_index(AdtVariantDefinition {
-                        variant_name,
-                        ctor_path: item_name.clone().into(),
-                        ctor_style: AdtVariantCtorStyle::BraceNamed,
-                        mandatory_components: Vec::new(),
-                        optional_components: Vec::new(),
-                    });
-                let mut comp_list_in_variant = Vec::new();
-                let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    ENTITY_INHERENT_COMP_IDX
-                } else {
-                    let (comp_def_idx, _) =
-                        comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                            component_name: inherent_group_ident.clone(),
-                            is_inherent: true,
-                            is_single_field_group: true,
-                            always_mandatory: true,
-                            applicable_variants: vec![],
-                            fields_named: false,
-                            fields: Vec::new(),
-                            field_indexes_in_applicable_variants: vec![],
-                        });
-                    comp_def_idx
-                };
-                comp_list_in_variant.push(inherent_comp_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .applicable_variants
-                    .push(variant_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .field_indexes_in_applicable_variants
-                    .push(Vec::new());
-                variant_def.mandatory_components.push(inherent_comp_def_idx);
-                let field_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    unreachable!();
-                } else {
-                    inherent_comp_def_idx
-                };
-                comp_defs[field_comp_def_idx]
-                    .fields
-                    .push(utils::GeneralizedField::new_from_syn_field(field, 0, utils::GeneralizedFieldFlags::None)?);
-            }
-        }
-    }
-    Ok((variant_defs, comp_defs))
 }
 
 #[proc_macro_attribute]
@@ -474,10 +143,10 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
     // let option_shared = utils::has_str_meta_in_args(&args, "shared");   // FIXME: NOT SUPPORTED YET
     let option_data = unwrap_result_in_macro!(args.get_ident_with_name("data"));
     let option_repo_ty = unwrap_result_in_macro!(args.get_path_with_name("repo"));
-    let mut item = parse_macro_input!(item as utils::ItemStructOrEnumOrUnion);
+    let mut item = parse_macro_input!(item as adt::ItemStructOrEnumOrUnion);
     let option_crate_name = ident_crate_repo(item.span());
 
-    let derives = utils::attrs_take_with_ident_name(item.attrs_mut(), "derive").collect::<Vec<_>>();
+    let derives = adt::attrs_take_with_ident_name(item.attrs_mut(), "derive").collect::<Vec<_>>();
 
     let handle_ident = item.name();
     let handle_vis = item.vis();
@@ -503,9 +172,9 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
         .attrs_mut()
         .extend(Some(attr_allow_non_camel_case_types(handle_ident.span())));
 
-    let (var_defs, comp_defs) = unwrap_result_in_macro!(collect_adt_variants_and_components(
+    let (var_defs, comp_defs) = unwrap_result_in_macro!(adt::collect_adt_variants_and_components(
         data_struct.borrow_mut(),
-        AdtKind::Interned,
+        adt::AdtKind::Interned,
         &utils::IdentPair::from_camel_case_ident(data_ident.clone()),
     ));
 
@@ -513,11 +182,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
         .iter()
         .enumerate()
         .map(|(var_def_idx, var_def)| {
-            let ctor_ident = if let Some(ident_pair) = &var_def.variant_name {
-                ident_from_combining!(ident_pair.span() => "new", ident_pair.snake_case)
-            } else {
-                syn::Ident::new_raw("new", handle_ident.span())
-            };
+            let ctor_ident = var_def.default_ctor_fn_name(handle_ident.span());
             assert!(var_def.optional_components.is_empty());
             let mut ctor_param_list: Vec<Option<(syn::Ident, syn::Type, Option<syn::Ident>)>> =
                 Vec::new();
@@ -566,7 +231,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                 unimplemented!() // FIXME
             };
             let ctor_expr = match ctor_style {
-                AdtVariantCtorStyle::BraceNamed => {
+                adt::AdtVariantCtorStyle::BraceNamed => {
                     let ctor_args = if !use_keyed {
                         ctor_param_list
                             .iter()
@@ -584,7 +249,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                         #ctor_path{#(#ctor_args)*}
                     )
                 }
-                AdtVariantCtorStyle::ParenUnamed => {
+                adt::AdtVariantCtorStyle::ParenUnamed => {
                     let ctor_args = ctor_param_list
                         .iter()
                         .map(|ctor_param| {
@@ -596,7 +261,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                         #ctor_path(#(#ctor_args)*)
                     )
                 }
-                AdtVariantCtorStyle::Unit => quote!(
+                adt::AdtVariantCtorStyle::Unit => quote!(
                     #ctor_path
                 ),
             };
@@ -760,28 +425,24 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as utils::AttributeArgs);
     let option_inherent = unwrap_result_in_macro!(args.get_ident_with_name("inherent"));
     let option_repo_ty = unwrap_result_in_macro!(args.get_path_with_name("repo"));
-    let mut item = parse_macro_input!(item as utils::ItemStructOrEnum);
+    let mut item = parse_macro_input!(item as adt::ItemStructOrEnum);
     let option_crate_name = ident_crate_repo(item.span());
-    let derives = utils::attrs_take_with_ident_name(item.attrs_mut(), "derive").collect::<Vec<_>>();
+    let derives = adt::attrs_take_with_ident_name(item.attrs_mut(), "derive").collect::<Vec<_>>();
 
     let handle_ident = item.name();
     validate_name_in_macro!(handle_ident);
     let handle_vis = item.vis();
-    let inherent_ident = if let Some(ident) = &option_inherent {
-        ident.clone()
-    } else {
-        let inherent_suffix = "Inherent";
-        ident_from_combining!(handle_ident.span() => handle_ident, inherent_suffix)
-    };
-    let repo_ty = if let Some(ty) = &option_repo_ty {
-        ty.clone()
-    } else {
-        path_crate_repo(handle_ident.span())
-    };
+    let inherent_ident = option_inherent
+        .clone()
+        .unwrap_or_else(|| ident_from_combining!(handle_ident.span() => handle_ident, "Inherent"));
 
-    let (var_defs, comp_defs) = unwrap_result_in_macro!(collect_adt_variants_and_components(
+    let repo_ty = option_repo_ty
+        .clone()
+        .unwrap_or_else(|| path_crate_repo(handle_ident.span()));
+
+    let (var_defs, comp_defs) = unwrap_result_in_macro!(adt::collect_adt_variants_and_components(
         item.borrow_mut(),
-        AdtKind::Entity,
+        adt::AdtKind::Entity,
         &utils::IdentPair::from_camel_case_ident(inherent_ident.clone())
     ));
 
@@ -790,32 +451,30 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut component_storage_new_expr: Vec<TokenStream2> = Vec::new();
 
     for comp_def in comp_defs.iter() {
-        let mut comp_attrs = item.attrs().clone();
-        comp_attrs.extend(derives.iter().cloned());
-        comp_attrs.extend(Some(attr_allow_non_camel_case_types(handle_ident.span())));
+        let mut comp_attrs = item
+            .attrs()
+            .iter()
+            .cloned()
+            .chain(derives.iter().cloned())
+            .chain(Some(attr_allow_non_camel_case_types(handle_ident.span())))
+            .collect::<Vec<_>>();
         let comp_name = comp_def.component_name.camel_case_ident();
-        let comp_fields = if comp_def.fields_named {
-            syn::Fields::Named(syn::FieldsNamed {
-                brace_token: Default::default(),
-                named: syn::punctuated::Punctuated::from_iter(
-                    comp_def.fields.iter().map(|x| x.field.clone()),
-                ),
-            })
-        } else {
-            syn::Fields::Unnamed(syn::FieldsUnnamed {
-                paren_token: Default::default(),
-                unnamed: syn::punctuated::Punctuated::from_iter(
-                    comp_def.fields.iter().map(|x| x.field.clone()),
-                ),
-            })
-        };
+        let comp_fields = adt::build_fields_from_field_iter(
+            if comp_def.fields_named {
+                adt::AdtVariantCtorStyle::BraceNamed
+            } else {
+                adt::AdtVariantCtorStyle::ParenUnamed
+            },
+            comp_def.fields.iter().map(|x| x.field.clone()),
+        );
+
         let comp_def_struct = syn::ItemStruct {
             attrs: comp_attrs,
             vis: handle_vis.clone(),
-            struct_token: Default::default(),
             ident: comp_name.clone(),
-            generics: Default::default(),
             fields: comp_fields,
+            struct_token: Default::default(),
+            generics: Default::default(),
             semi_token: Default::default(),
         };
 
@@ -823,21 +482,14 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
             #comp_def_struct
         });
 
-        let (storage, storage_new_expr) = match (comp_def.is_inherent, comp_def.always_mandatory) {
-            (true, true) => (
-                quote!(#option_crate_name ::component_storage::DenseStorageWithId<#comp_name>),
-                quote!(#option_crate_name ::component_storage::DenseStorageWithId::new(kiosk_entry)),
-            ),
-            (true, false) => unreachable!(),
-            (false, true) => (
-                quote!(#option_crate_name ::component_storage::DenseStorage<#comp_name>),
-                quote!(#option_crate_name ::component_storage::DenseStorage::new()),
-            ),
-            (false, false) => (
-                quote!(#option_crate_name ::component_storage::SparseStorage<#comp_name>),
-                quote!(#option_crate_name ::component_storage::SparseStorage::new()),
-            ),
-        };
+        let (storage, storage_new_expr) = adt::component_storage_ty_and_build_expr(
+            adt::AdtKind::Entity,
+            &option_crate_name,
+            &comp_name,
+            &quote!(kiosk_entry),
+            comp_def.is_inherent,
+            comp_def.always_mandatory,
+        );
         component_storages.push(storage);
         component_storage_new_expr.push(storage_new_expr);
     }
@@ -846,11 +498,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
         .iter()
         .enumerate()
         .map(|(var_def_idx, var_def)| {
-            let ctor_ident = if let Some(ident_pair) = &var_def.variant_name {
-                ident_from_combining!(ident_pair.span() => "new", ident_pair.snake_case)
-            } else {
-                syn::Ident::new_raw("new", handle_ident.span())
-            };
+            let ctor_ident = var_def.default_ctor_fn_name(handle_ident.span());
             let mut ctor_param_list: Vec<Option<(syn::Ident, syn::Type, Option<syn::Ident>, usize)>> =
                 Vec::new();
             let mut ctor_comp_expr_list: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -898,12 +546,12 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let comp_name = comp_def.component_name.camel_case_ident();
                 let comp_def_index = syn::Index::from(comp_def_idx);
                 let comp_style = if comp_def.is_inherent {
-                    AdtVariantCtorStyle::BraceNamed
+                    adt::AdtVariantCtorStyle::BraceNamed
                 } else {
                     var_def.ctor_style
                 };
                 let comp_expr = match comp_style {
-                    AdtVariantCtorStyle::BraceNamed => {
+                    adt::AdtVariantCtorStyle::BraceNamed => {
                         let comp_args = if !use_keyed {
                             ctor_param_list
                                 .iter()
@@ -924,7 +572,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                             #comp_name{#(#comp_args)*}
                         )
                     }
-                    AdtVariantCtorStyle::ParenUnamed => {
+                    adt::AdtVariantCtorStyle::ParenUnamed => {
                         let comp_args = ctor_param_list
                             .iter()
                             .flat_map(|ctor_param| {
@@ -939,11 +587,11 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                             #comp_name(#(#comp_args)*)
                         )
                     }
-                    AdtVariantCtorStyle::Unit => quote!(
+                    adt::AdtVariantCtorStyle::Unit => quote!(
                         #comp_name
                     ),
                 };
-                
+
                 let ctor_comp_expr = if comp_def.is_inherent {
                     assert!(comp_is_mandatory);
                     assert!(comp_def.fields_named);
@@ -1119,7 +767,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                             #ret_expr
                         }}
                     }
-                }; 
+                };
                 let getter_impl = if field_def.has_getter() {
                     quote! {
                         #accessor_vis fn #accessor_ident(self, __repo: &#repo_ty) -> #getter_ret_ty {

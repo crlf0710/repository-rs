@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[repo::repo]
 #[member(Color, Fruit)]
 #[derive(Default)]
