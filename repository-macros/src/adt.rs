@@ -727,5 +727,22 @@ pub(crate) fn collect_adt_variants_and_components(
             comp_defs[field_comp_def_idx].field_indexes_in_applicable_variants[0].push(field_idx);
         }
     }
+
+    // FIXME: Merge same name groups from different variants, or error
+    let all_variants_count = variant_defs.len();
+    'outer: for (comp_def_idx, comp_def) in comp_defs.iter_mut().enumerate() {
+        if comp_def.applicable_variants.len() < all_variants_count {
+            continue;
+        }
+        for applicable_variant in comp_def.applicable_variants.iter().cloned() {
+            if !variant_defs[applicable_variant]
+                .mandatory_components
+                .contains(&comp_def_idx)
+            {
+                continue 'outer;
+            }
+        }
+        comp_def.always_mandatory = true;
+    }
     Ok((variant_defs, comp_defs))
 }

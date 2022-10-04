@@ -664,6 +664,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let accessor_setter_ident = ident_from_combining!(accessor_ident.span() => "set", accessor_ident);
                 let accessor_vis = field_def.vis();
                 let getter_ret_inner_ty = field_def.field.ty.clone();
+                let ref_getter_ret_inner_ty = field_def.field.ty.clone().wrap_ty_with_shared_ref();
                 let setter_ret_inner_ty = type_unit(proc_macro2::Span::call_site());
                 let setter_input_ty = field_def.field.ty.clone();
                 let error_ty_component_not_present = syn::Type::Path(syn::TypePath {
@@ -678,6 +679,12 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                 } else {
                     let error_ty = error_ty_component_not_present.clone();
                     getter_ret_inner_ty.wrap_ty_with_result(error_ty)
+                };
+                let ref_getter_ret_ty = if comp_def.always_mandatory {
+                    ref_getter_ret_inner_ty
+                } else {
+                    let error_ty = error_ty_component_not_present.clone();
+                    ref_getter_ret_inner_ty.wrap_ty_with_result(error_ty)
                 };
                 let setter_ret_ty = if comp_def.always_mandatory {
                     setter_ret_inner_ty
@@ -695,11 +702,11 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                     (
                         quote! {
                             let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list(__repo);
-                            let __comp = __comp_list.#comp_def_index.get(self.entity_id).unwrap()
+                            let __comp = __comp_list.#comp_def_index.get(self.entity_id);
                         },
                         quote! {
                             let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list_mut(__repo);
-                            let __comp = __comp_list.#comp_def_index.get_mut(self.entity_id).unwrap()
+                            let __comp = __comp_list.#comp_def_index.get_mut(self.entity_id);
                         },
                         quote! {
                             __value
@@ -750,6 +757,35 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                         }}
                     }
                 };
+                let ref_getter_expr = {
+                    if is_named {
+                        let field_name = field_def.field.ident.as_ref().unwrap();
+                        quote!{{
+                            #comp_expr
+                            let __value = if let #comp_name{#field_name: value, ..} = __comp {
+                                value
+                            } else {
+                                unreachable!()
+                            };
+                            #ret_expr
+                        }}
+                    } else {
+                        let mut pattern = TokenStream2::new();
+                        for _ in 0..field_def.indexes_in_applicable_variants[0] {
+                            pattern.extend(quote!(_,));
+                        }
+                        pattern.extend(quote!(value, ..));
+                        quote!{{
+                            #comp_expr
+                            let __value = if let #comp_name(#pattern) = __comp {
+                                value
+                            } else {
+                                unreachable!()
+                            };
+                            #ret_expr
+                        }}
+                    }
+                };
                 let setter_expr  = {
                     if is_named {
                         let field_name = field_def.field.ident.as_ref().unwrap();
@@ -778,6 +814,15 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                 } else {
                     quote! {}
                 };
+                let ref_getter_impl = if field_def.has_ref_getter() {
+                    quote! {
+                        #accessor_vis fn #accessor_ident(self, __repo: &#repo_ty) -> #ref_getter_ret_ty {
+                            #ref_getter_expr
+                        }
+                    }
+                } else {
+                    quote! {}
+                };
                 let setter_impl = if field_def.has_setter() {
                     quote! {
                         #accessor_vis fn #accessor_setter_ident(self, value: #setter_input_ty, __repo: &mut #repo_ty) -> #setter_ret_ty {
@@ -789,6 +834,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                 };
                 quote! {
                     #getter_impl
+                    #ref_getter_impl
                     #setter_impl
                 }
             })

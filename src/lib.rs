@@ -435,6 +435,11 @@ pub mod component_storage {
         }
 
         #[inline]
+        pub fn get(&self, id: Id) -> &D {
+            self.inner.get(id)
+        }
+
+        #[inline]
         pub fn append(&mut self, id: Id, d: D) {
             self.inner.append(id, d);
         }
