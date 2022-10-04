@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Charles Lew <crlf0710@gmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2021"
+rust-version = "1.65"
 description = "A repository for all kinds of entities."
 repository = "https://github.com/crlf0710/repository-rs"
 

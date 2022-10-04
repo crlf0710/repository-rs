@@ -1,5 +1,4 @@
 #![allow(dead_code, unused)]
-#![feature(let_else)]
 
 use crate::utils::IdentPair;
 use crate::utils::IdentText;
