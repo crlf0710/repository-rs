@@ -672,3 +672,15 @@ impl TyWrap for syn::Type {
         })
     }
 }
+
+pub(crate) enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+pub(crate) trait StreamingIterator {
+    type Item<'a>
+    where
+        Self: 'a;
+    fn next(&mut self) -> Option<Self::Item<'_>>;
+}

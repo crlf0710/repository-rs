@@ -1,6 +1,7 @@
 use crate::utils;
 use crate::utils::IdentPair;
 use crate::utils::RetainOrTake;
+use crate::utils::StreamingIterator;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 
@@ -84,6 +85,56 @@ impl<'a> ItemAdtMutRef<'a> {
             | ItemAdtMutRef::Union(syn::ItemUnion { attrs, .. }) => attrs,
         }
     }
+
+    pub(crate) fn generalized_variants_iter_mut(self) -> GeneralizedVariantIterMut<'a> {
+        match self {
+            ItemAdtMutRef::Struct(syn::ItemStruct {
+                attrs,
+                vis,
+                ident,
+                fields,
+                ..
+            }) => GeneralizedVariantIterMut {
+                end_of_iterator: false,
+                idx: 0,
+                outer_attributes: attrs,
+                outer_ident: ident,
+                outer_vis: vis,
+                fields: Some(fields),
+                iter_mut: None,
+            },
+            ItemAdtMutRef::Enum(syn::ItemEnum {
+                attrs,
+                vis,
+                ident,
+                variants,
+                ..
+            }) => GeneralizedVariantIterMut {
+                end_of_iterator: false,
+                idx: 0,
+                outer_attributes: attrs,
+                outer_ident: ident,
+                outer_vis: vis,
+                fields: None,
+                iter_mut: Some(utils::Either::Left(variants.iter_mut())),
+            },
+            ItemAdtMutRef::Union(syn::ItemUnion {
+                attrs,
+                vis,
+                ident,
+                fields,
+                ..
+            }) => GeneralizedVariantIterMut {
+                end_of_iterator: false,
+                idx: 0,
+                outer_attributes: attrs,
+                outer_ident: ident,
+                outer_vis: vis,
+                fields: None,
+                iter_mut: Some(utils::Either::Right(fields.named.iter_mut())),
+            },
+        }
+    }
 }
 
 delegate_single_fn_impl! {
@@ -128,6 +179,158 @@ pub(crate) fn attrs_take_with_ident_name<'a>(
     attrs.retain_or_take(|attr| !attr.path.is_ident(ident_name))
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GeneralizedVariantKind {
+    StructWhole,
+    EnumVariant,
+    UnionField,
+}
+
+#[derive(Debug)]
+pub(crate) struct GeneralizedVariantMut<'a> {
+    kind: GeneralizedVariantKind,
+    index: usize,
+    outer_attributes: &'a mut Vec<syn::Attribute>,
+    outer_ident: &'a mut syn::Ident,
+    outer_vis: &'a mut syn::Visibility,
+    inner_attributes: Option<&'a mut Vec<syn::Attribute>>,
+    inner_ident: Option<&'a mut syn::Ident>,
+    inner_vis: Option<&'a mut syn::Visibility>,
+    struct_or_enumvariant_fields: Option<&'a mut syn::Fields>,
+    enumvariant_discriminant: Option<&'a mut (syn::Token![=], syn::Expr)>,
+    union_single_ty: Option<&'a mut syn::Type>,
+}
+
+impl GeneralizedVariantMut<'_> {
+    pub(crate) fn variant_name(&self) -> Option<IdentPair> {
+        let ident = self.inner_ident.as_ref().map(|x| (**x).clone())?;
+        let ident = match self.kind {
+            GeneralizedVariantKind::StructWhole => unreachable!(),
+            GeneralizedVariantKind::EnumVariant => IdentPair::from_camel_case_ident(ident),
+            GeneralizedVariantKind::UnionField => IdentPair::from_snake_case_ident(ident),
+        };
+        Some(ident)
+    }
+
+    pub(crate) fn variant_ctor_path(&self) -> syn::Path {
+        match self.kind {
+            GeneralizedVariantKind::StructWhole => self.outer_ident.clone().into(),
+            GeneralizedVariantKind::UnionField => self.outer_ident.clone().into(),
+            GeneralizedVariantKind::EnumVariant => syn::Path {
+                leading_colon: None,
+                segments: syn::punctuated::Punctuated::from_iter(vec![
+                    syn::PathSegment {
+                        ident: self.outer_ident.clone(),
+                        arguments: syn::PathArguments::None,
+                    },
+                    syn::PathSegment {
+                        ident: self.inner_ident.as_ref().map(|x| (**x).clone()).unwrap(),
+                        arguments: syn::PathArguments::None,
+                    },
+                ]),
+            },
+        }
+    }
+
+    pub(crate) fn variant_ctor_style(&self) -> AdtVariantCtorStyle {
+        if let Some(fields) = &self.struct_or_enumvariant_fields {
+            match fields {
+                syn::Fields::Named(_) => AdtVariantCtorStyle::BraceNamed,
+                syn::Fields::Unnamed(_) => AdtVariantCtorStyle::ParenUnamed,
+                syn::Fields::Unit => AdtVariantCtorStyle::Unit,
+            }
+        } else {
+            AdtVariantCtorStyle::BraceNamed
+        }
+    }
+}
+
+pub(crate) struct GeneralizedVariantIterMut<'a> {
+    end_of_iterator: bool,
+    idx: usize,
+    outer_attributes: &'a mut Vec<syn::Attribute>,
+    outer_ident: &'a mut syn::Ident,
+    outer_vis: &'a mut syn::Visibility,
+    fields: Option<&'a mut syn::Fields>,
+    iter_mut: Option<
+        utils::Either<
+            syn::punctuated::IterMut<'a, syn::Variant>,
+            syn::punctuated::IterMut<'a, syn::Field>,
+        >,
+    >,
+}
+
+impl utils::StreamingIterator for GeneralizedVariantIterMut<'_> {
+    type Item<'a> = GeneralizedVariantMut<'a> where Self: 'a;
+    fn next(&mut self) -> Option<Self::Item<'_>> {
+        if self.end_of_iterator {
+            return None;
+        }
+        match &mut self.iter_mut {
+            None => {
+                let v = GeneralizedVariantMut {
+                    kind: GeneralizedVariantKind::StructWhole,
+                    index: self.idx,
+                    outer_attributes: self.outer_attributes,
+                    outer_ident: self.outer_ident,
+                    outer_vis: self.outer_vis,
+                    inner_attributes: None,
+                    inner_ident: None,
+                    inner_vis: None,
+                    struct_or_enumvariant_fields: self.fields.as_mut().map(|x| &mut **x),
+                    enumvariant_discriminant: None,
+                    union_single_ty: None,
+                };
+                self.idx += 1;
+                self.end_of_iterator = true;
+                Some(v)
+            }
+            Some(utils::Either::Left(variant_iter_mut)) => {
+                let Some(variant) = variant_iter_mut.next() else {
+                    self.end_of_iterator = true;
+                    return None;
+                };
+                let v = GeneralizedVariantMut {
+                    kind: GeneralizedVariantKind::EnumVariant,
+                    index: self.idx,
+                    outer_attributes: self.outer_attributes,
+                    outer_ident: self.outer_ident,
+                    outer_vis: self.outer_vis,
+                    inner_attributes: Some(&mut variant.attrs),
+                    inner_ident: Some(&mut variant.ident),
+                    inner_vis: None,
+                    struct_or_enumvariant_fields: Some(&mut variant.fields),
+                    enumvariant_discriminant: variant.discriminant.as_mut(),
+                    union_single_ty: None,
+                };
+                self.idx += 1;
+                Some(v)
+            }
+            Some(utils::Either::Right(field_iter_mut)) => {
+                let Some(field) = field_iter_mut.next() else {
+                    self.end_of_iterator = true;
+                    return None;
+                };
+                let v = GeneralizedVariantMut {
+                    kind: GeneralizedVariantKind::UnionField,
+                    index: self.idx,
+                    outer_attributes: self.outer_attributes,
+                    outer_ident: self.outer_ident,
+                    outer_vis: self.outer_vis,
+                    inner_attributes: Some(&mut field.attrs),
+                    inner_ident: field.ident.as_mut(),
+                    inner_vis: Some(&mut field.vis),
+                    struct_or_enumvariant_fields: None,
+                    enumvariant_discriminant: None,
+                    union_single_ty: Some(&mut field.ty),
+                };
+                self.idx += 1;
+                Some(v)
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct GeneralizedField {
     pub(crate) field: syn::Field,
@@ -140,8 +343,10 @@ pub(crate) struct GeneralizedField {
 pub(crate) enum GeneralizedFieldFlags {
     None,
     Getter,
+    RefGetter,
     Setter,
     GetterAndSetter,
+    RefGetterAndSetter,
 }
 
 impl GeneralizedField {
@@ -176,14 +381,31 @@ impl GeneralizedField {
     pub(crate) fn has_getter(&self) -> bool {
         match self.flags {
             GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => true,
-            GeneralizedFieldFlags::None | GeneralizedFieldFlags::Setter => false,
+            GeneralizedFieldFlags::None
+            | GeneralizedFieldFlags::RefGetter
+            | GeneralizedFieldFlags::Setter
+            | GeneralizedFieldFlags::RefGetterAndSetter => false,
+        }
+    }
+
+    pub(crate) fn has_ref_getter(&self) -> bool {
+        match self.flags {
+            GeneralizedFieldFlags::RefGetter | GeneralizedFieldFlags::RefGetterAndSetter => true,
+            GeneralizedFieldFlags::None
+            | GeneralizedFieldFlags::Getter
+            | GeneralizedFieldFlags::Setter
+            | GeneralizedFieldFlags::GetterAndSetter => false,
         }
     }
 
     pub(crate) fn has_setter(&self) -> bool {
         match self.flags {
-            GeneralizedFieldFlags::Setter | GeneralizedFieldFlags::GetterAndSetter => true,
-            GeneralizedFieldFlags::None | GeneralizedFieldFlags::Getter => false,
+            GeneralizedFieldFlags::Setter
+            | GeneralizedFieldFlags::GetterAndSetter
+            | GeneralizedFieldFlags::RefGetterAndSetter => true,
+            GeneralizedFieldFlags::None
+            | GeneralizedFieldFlags::RefGetter
+            | GeneralizedFieldFlags::Getter => false,
         }
     }
 }
@@ -316,287 +538,193 @@ pub(crate) fn collect_adt_variants_and_components(
         });
         assert_eq!(comp_def_idx, ENTITY_INHERENT_COMP_IDX);
     };
-    match item {
-        ItemAdtMutRef::Struct(syn::ItemStruct {
-            ident: item_name,
-            fields,
-            ..
-        }) => {
-            let (variant_def_idx, variant_def) =
-                variant_defs.push_and_get_with_index(AdtVariantDefinition {
-                    variant_name: None,
-                    ctor_path: item_name.clone().into(),
-                    ctor_style: match fields {
-                        syn::Fields::Named(_) => AdtVariantCtorStyle::BraceNamed,
-                        syn::Fields::Unnamed(_) => AdtVariantCtorStyle::ParenUnamed,
-                        syn::Fields::Unit => AdtVariantCtorStyle::Unit,
-                    },
-                    mandatory_components: Vec::new(),
-                    optional_components: Vec::new(),
-                });
-            let mut comp_list_in_variant = Vec::new();
-            let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                ENTITY_INHERENT_COMP_IDX
-            } else {
-                let (comp_def_idx, _) = comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                    component_name: inherent_group_ident.clone(),
-                    is_inherent: true,
-                    is_single_field_group: false,
-                    always_mandatory: true,
-                    applicable_variants: vec![],
-                    fields_named: !matches!(fields, syn::Fields::Unnamed { .. }),
-                    fields: Vec::new(),
-                    field_indexes_in_applicable_variants: vec![],
-                });
-                comp_def_idx
-            };
-            comp_list_in_variant.push(inherent_comp_def_idx);
-            comp_defs[inherent_comp_def_idx]
-                .applicable_variants
-                .push(variant_def_idx);
-            comp_defs[inherent_comp_def_idx]
-                .field_indexes_in_applicable_variants
-                .push(Vec::new());
-            variant_def.mandatory_components.push(inherent_comp_def_idx);
-            for (field_idx, field) in fields.iter_mut().enumerate() {
-                let field_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    todo!("b"); // FIXME
-                } else {
-                    inherent_comp_def_idx
-                };
-                let can_supply_setter = matches!(adt_kind, AdtKind::Entity)
-                    && !comp_defs[field_comp_def_idx].is_inherent;
-                comp_defs[field_comp_def_idx]
-                    .fields
-                    .push(GeneralizedField::new_from_syn_field(
-                        field,
-                        field_idx,
-                        if can_supply_setter {
-                            GeneralizedFieldFlags::GetterAndSetter
-                        } else {
-                            GeneralizedFieldFlags::Getter
-                        },
-                    )?);
-            }
+    let mut variant_iter_mut = item.generalized_variants_iter_mut();
+    while let Some(mut variant) = variant_iter_mut.next() {
+        if matches!(variant.kind, GeneralizedVariantKind::EnumVariant)
+            && matches!(adt_kind, AdtKind::Entity)
+            && variant.enumvariant_discriminant.is_some()
+        {
+            return Err(syn::Error::new(
+                variant.enumvariant_discriminant.as_ref().unwrap().1.span(),
+                "enumerate entity cannot specify discriminant",
+            ));
         }
-        ItemAdtMutRef::Enum(syn::ItemEnum {
-            ident: item_name,
-            variants,
-            ..
-        }) => {
-            for variant in variants {
-                if let (AdtKind::Entity, Some((_, e))) = (adt_kind, &variant.discriminant) {
-                    return Err(syn::Error::new(
-                        e.span(),
-                        "enumerate entity cannot specify discriminant",
-                    ));
-                }
-                let (variant_def_idx, variant_def) =
-                    variant_defs.push_and_get_with_index(AdtVariantDefinition {
-                        variant_name: Some(utils::IdentPair::from_camel_case_ident(
-                            variant.ident.clone(),
-                        )),
-                        ctor_path: syn::Path {
-                            leading_colon: None,
-                            segments: syn::punctuated::Punctuated::from_iter(vec![
-                                syn::PathSegment {
-                                    ident: item_name.clone(),
-                                    arguments: syn::PathArguments::None,
-                                },
-                                syn::PathSegment {
-                                    ident: variant.ident.clone(),
-                                    arguments: syn::PathArguments::None,
-                                },
-                            ]),
-                        },
-                        ctor_style: match variant.fields {
-                            syn::Fields::Named(_) => AdtVariantCtorStyle::BraceNamed,
-                            syn::Fields::Unnamed(_) => AdtVariantCtorStyle::ParenUnamed,
-                            syn::Fields::Unit => AdtVariantCtorStyle::Unit,
-                        },
-                        mandatory_components: Vec::new(),
-                        optional_components: Vec::new(),
-                    });
-                let mut comp_list_in_variant = Vec::new();
-                let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    ENTITY_INHERENT_COMP_IDX
+        let variant_name = variant.variant_name();
+        let variant_ctor_path = variant.variant_ctor_path();
+        let variant_ctor_style = variant.variant_ctor_style();
+
+        let (variant_def_idx, variant_def) =
+            variant_defs.push_and_get_with_index(AdtVariantDefinition {
+                variant_name,
+                ctor_path: variant_ctor_path,
+                ctor_style: variant_ctor_style,
+                mandatory_components: Vec::new(),
+                optional_components: Vec::new(),
+            });
+
+        // associate the newly created variant with the inherent group.
+        let mut comp_list_in_variant = Vec::new();
+        let variant_fields_named = !matches!(variant_ctor_style, AdtVariantCtorStyle::ParenUnamed);
+
+        let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
+            ENTITY_INHERENT_COMP_IDX
+        } else {
+            let (comp_def_idx, _) = comp_defs.push_and_get_with_index(AdtComponentDefinition {
+                component_name: inherent_group_ident.clone(),
+                is_inherent: true,
+                is_single_field_group: false,
+                always_mandatory: true,
+                applicable_variants: vec![],
+                fields_named: variant_fields_named,
+                fields: Vec::new(),
+                field_indexes_in_applicable_variants: vec![],
+            });
+            comp_def_idx
+        };
+        comp_list_in_variant.push(inherent_comp_def_idx);
+        comp_defs[inherent_comp_def_idx]
+            .applicable_variants
+            .push(variant_def_idx);
+        comp_defs[inherent_comp_def_idx]
+            .field_indexes_in_applicable_variants
+            .push(Vec::new());
+        variant_def.mandatory_components.push(inherent_comp_def_idx);
+
+        // add fields to the group.
+        if let Some(fields) = &mut variant.struct_or_enumvariant_fields {
+            let fields = &mut **fields;
+            for (field_idx, field) in fields.iter_mut().enumerate() {
+                let field_comp_def_idx;
+                if !matches!(adt_kind, AdtKind::Entity) {
+                    field_comp_def_idx = inherent_comp_def_idx;
                 } else {
-                    let (comp_def_idx, _) =
-                        comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                            component_name: inherent_group_ident.clone(),
-                            is_inherent: true,
-                            is_single_field_group: false,
-                            always_mandatory: true,
-                            applicable_variants: vec![],
-                            fields_named: !matches!(variant.fields, syn::Fields::Unnamed { .. }),
-                            fields: Vec::new(),
-                            field_indexes_in_applicable_variants: vec![],
-                        });
-                    comp_def_idx
-                };
-                comp_list_in_variant.push(inherent_comp_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .applicable_variants
-                    .push(variant_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .field_indexes_in_applicable_variants
-                    .push(Vec::new());
-                variant_def.mandatory_components.push(inherent_comp_def_idx);
-                let variant_fields_named = !matches!(variant.fields, syn::Fields::Unnamed { .. });
-                for (field_idx, field) in variant.fields.iter_mut().enumerate() {
-                    let field_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                        let inherent_attr =
-                            attrs_take_with_ident_name(&mut field.attrs, "inherent")
-                                .collect::<Vec<_>>();
-                        if !inherent_attr.is_empty() {
+                    let inherent_attr = attrs_take_with_ident_name(&mut field.attrs, "inherent")
+                        .collect::<Vec<_>>();
+                    if !inherent_attr.is_empty() {
+                        if matches!(variant.kind, GeneralizedVariantKind::StructWhole) {
+                            field_comp_def_idx = inherent_comp_def_idx;
+                        } else {
                             return Err(syn::Error::new(
                                 inherent_attr[0].span(),
                                 "#[inherent] is not allowd for enums",
                             ));
-                        } else {
-                            let group_attr = attrs_take_with_ident_name(&mut field.attrs, "group")
-                                .collect::<Vec<_>>();
-                            let is_single_field_group = group_attr.is_empty();
-                            let mut existing_comp_idx = None;
-                            let group_comp_name;
-                            if !is_single_field_group {
-                                let group_attr =
-                                    utils::GeneralizedMeta::parse_attribute(&group_attr[0])?;
-                                let group_name = utils::IdentPair::from_snake_case_ident(
-                                    group_attr.get_ident_value()?,
-                                );
-                                group_comp_name = ident_from_combining!(group_name.span() => item_name, group_name.camel_case_ident());
-                                for comp_idx_in_variant in comp_list_in_variant.iter().cloned() {
-                                    if !comp_defs[comp_idx_in_variant].is_single_field_group
-                                        && comp_defs[comp_idx_in_variant]
-                                            .component_name
-                                            .eq_camel_case_ident(&group_comp_name)
-                                    {
-                                        existing_comp_idx = Some(comp_idx_in_variant);
-                                    }
-                                }
-                            } else {
-                                let field_name = if let Some(ident) = field.ident.as_ref() {
-                                    ident.clone()
-                                } else {
-                                    syn::Ident::new_raw(&format!("field{field_idx}"), field.span())
-                                };
-                                let field_name =
-                                    utils::IdentPair::from_snake_case_ident(field_name);
-                                group_comp_name = ident_from_combining!(field_name.span() => item_name, "Field", field_name.camel_case_ident());
-                            }
-                            let comp_def_idx = if let Some(existing_comp_idx) = existing_comp_idx {
-                                existing_comp_idx
-                            } else {
-                                let (comp_def_idx, _) =
-                                    comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                                        component_name: utils::IdentPair::from_camel_case_ident(
-                                            group_comp_name,
-                                        ),
-                                        is_inherent: false,
-                                        is_single_field_group,
-                                        always_mandatory: false,
-                                        applicable_variants: vec![],
-                                        fields_named: variant_fields_named,
-                                        fields: Vec::new(),
-                                        field_indexes_in_applicable_variants: vec![],
-                                    });
-
-                                comp_list_in_variant.push(comp_def_idx);
-                                comp_defs[comp_def_idx]
-                                    .applicable_variants
-                                    .push(variant_def_idx);
-                                comp_defs[comp_def_idx]
-                                    .field_indexes_in_applicable_variants
-                                    .push(Vec::new());
-                                variant_def.mandatory_components.push(comp_def_idx);
-                                comp_def_idx
-                            };
-                            comp_def_idx
                         }
                     } else {
-                        inherent_comp_def_idx
-                    };
-                    let can_supply_setter = matches!(adt_kind, AdtKind::Entity)
-                        && !comp_defs[field_comp_def_idx].is_inherent;
-                    comp_defs[field_comp_def_idx].fields.push(
-                        GeneralizedField::new_from_syn_field(
-                            field,
-                            field_idx,
-                            if can_supply_setter {
-                                GeneralizedFieldFlags::GetterAndSetter
+                        let group_attr = attrs_take_with_ident_name(&mut field.attrs, "group")
+                            .collect::<Vec<_>>();
+                        let is_single_field_group = group_attr.is_empty();
+                        let mut existing_comp_idx = None;
+                        let group_comp_name;
+                        if !is_single_field_group {
+                            let group_attr =
+                                utils::GeneralizedMeta::parse_attribute(&group_attr[0])?;
+                            let group_name = utils::IdentPair::from_snake_case_ident(
+                                group_attr.get_ident_value()?,
+                            );
+                            group_comp_name = ident_from_combining!(group_name.span() => item_name, group_name.camel_case_ident());
+                            for comp_idx_in_variant in comp_list_in_variant.iter().cloned() {
+                                if !comp_defs[comp_idx_in_variant].is_single_field_group
+                                    && comp_defs[comp_idx_in_variant]
+                                        .component_name
+                                        .eq_camel_case_ident(&group_comp_name)
+                                {
+                                    existing_comp_idx = Some(comp_idx_in_variant);
+                                }
+                            }
+                        } else {
+                            let field_name = if let Some(ident) = field.ident.as_ref() {
+                                ident.clone()
                             } else {
-                                GeneralizedFieldFlags::Getter
-                            },
-                        )?,
-                    );
-                    assert!(
-                        comp_defs[field_comp_def_idx]
-                            .field_indexes_in_applicable_variants
-                            .len()
-                            == 1
-                    );
-                    comp_defs[field_comp_def_idx].field_indexes_in_applicable_variants[0]
-                        .push(field_idx);
+                                syn::Ident::new_raw(&format!("field{field_idx}"), field.span())
+                            };
+                            let field_name = utils::IdentPair::from_snake_case_ident(field_name);
+                            group_comp_name = ident_from_combining!(field_name.span() => item_name, "Field", field_name.camel_case_ident());
+                        }
+                        let comp_def_idx = if let Some(existing_comp_idx) = existing_comp_idx {
+                            existing_comp_idx
+                        } else {
+                            let (comp_def_idx, _) =
+                                comp_defs.push_and_get_with_index(AdtComponentDefinition {
+                                    component_name: utils::IdentPair::from_camel_case_ident(
+                                        group_comp_name,
+                                    ),
+                                    is_inherent: false,
+                                    is_single_field_group,
+                                    always_mandatory: false,
+                                    applicable_variants: vec![],
+                                    fields_named: variant_fields_named,
+                                    fields: Vec::new(),
+                                    field_indexes_in_applicable_variants: vec![],
+                                });
+
+                            comp_list_in_variant.push(comp_def_idx);
+                            comp_defs[comp_def_idx]
+                                .applicable_variants
+                                .push(variant_def_idx);
+                            comp_defs[comp_def_idx]
+                                .field_indexes_in_applicable_variants
+                                .push(Vec::new());
+                            variant_def.mandatory_components.push(comp_def_idx);
+                            comp_def_idx
+                        };
+                        field_comp_def_idx = comp_def_idx;
+                    }
                 }
-            }
-        }
-        ItemAdtMutRef::Union(syn::ItemUnion {
-            ident: item_name,
-            fields,
-            ..
-        }) => {
-            for field in &mut fields.named {
-                let variant_name = field
-                    .ident
-                    .clone()
-                    .map(utils::IdentPair::from_snake_case_ident);
-                let (variant_def_idx, variant_def) =
-                    variant_defs.push_and_get_with_index(AdtVariantDefinition {
-                        variant_name,
-                        ctor_path: item_name.clone().into(),
-                        ctor_style: AdtVariantCtorStyle::BraceNamed,
-                        mandatory_components: Vec::new(),
-                        optional_components: Vec::new(),
-                    });
-                let mut comp_list_in_variant = Vec::new();
-                let inherent_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    ENTITY_INHERENT_COMP_IDX
-                } else {
-                    let (comp_def_idx, _) =
-                        comp_defs.push_and_get_with_index(AdtComponentDefinition {
-                            component_name: inherent_group_ident.clone(),
-                            is_inherent: true,
-                            is_single_field_group: true,
-                            always_mandatory: true,
-                            applicable_variants: vec![],
-                            fields_named: false,
-                            fields: Vec::new(),
-                            field_indexes_in_applicable_variants: vec![],
-                        });
-                    comp_def_idx
-                };
-                comp_list_in_variant.push(inherent_comp_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .applicable_variants
-                    .push(variant_def_idx);
-                comp_defs[inherent_comp_def_idx]
-                    .field_indexes_in_applicable_variants
-                    .push(Vec::new());
-                variant_def.mandatory_components.push(inherent_comp_def_idx);
-                let field_comp_def_idx = if matches!(adt_kind, AdtKind::Entity) {
-                    unreachable!();
-                } else {
-                    inherent_comp_def_idx
+                let ref_attr =
+                    attrs_take_with_ident_name(&mut field.attrs, "by_ref").collect::<Vec<_>>();
+                let use_ref_getter = !ref_attr.is_empty();
+                let use_setter = matches!(adt_kind, AdtKind::Entity)
+                    && !comp_defs[field_comp_def_idx].is_inherent;
+                let flags = match (use_ref_getter, use_setter) {
+                    (false, false) => GeneralizedFieldFlags::Getter,
+                    (false, true) => GeneralizedFieldFlags::GetterAndSetter,
+                    (true, false) => GeneralizedFieldFlags::RefGetter,
+                    (true, true) => GeneralizedFieldFlags::RefGetterAndSetter,
                 };
                 comp_defs[field_comp_def_idx]
                     .fields
                     .push(GeneralizedField::new_from_syn_field(
-                        field,
-                        0,
-                        GeneralizedFieldFlags::None,
+                        field, field_idx, flags,
                     )?);
+                assert_eq!(
+                    1,
+                    comp_defs[field_comp_def_idx]
+                        .field_indexes_in_applicable_variants
+                        .len()
+                );
+                comp_defs[field_comp_def_idx].field_indexes_in_applicable_variants[0]
+                    .push(field_idx);
             }
+        } else {
+            // union case.
+            assert!(!matches!(adt_kind, AdtKind::Entity));
+            let field_comp_def_idx = inherent_comp_def_idx;
+            let field_idx = 0;
+            let flags = GeneralizedFieldFlags::None;
+            let mut field = syn::Field {
+                attrs: Default::default(),
+                vis: variant.inner_vis.as_ref().map(|x| (**x).clone()).unwrap(),
+                ident: None,
+                colon_token: Default::default(),
+                ty: variant
+                    .union_single_ty
+                    .as_ref()
+                    .map(|x| (**x).clone())
+                    .unwrap(),
+            };
+
+            comp_defs[field_comp_def_idx]
+                .fields
+                .push(GeneralizedField::new_from_syn_field(
+                    &mut field, field_idx, flags,
+                )?);
+            assert_eq!(
+                1,
+                comp_defs[field_comp_def_idx]
+                    .field_indexes_in_applicable_variants
+                    .len()
+            );
+            comp_defs[field_comp_def_idx].field_indexes_in_applicable_variants[0].push(field_idx);
         }
     }
     Ok((variant_defs, comp_defs))
