@@ -117,21 +117,24 @@ impl ItemStructOnly {
                 )]),
             }),
         });
+        let new_field = syn::Field {
+            attrs: Default::default(),
+            vis: vis_crate,
+            ident: Some(field_name),
+            colon_token: Default::default(),
+            ty: field_ty,
+        };
         match self {
             ItemStructOnly::Struct(syn::ItemStruct { fields, .. }) => match fields {
                 syn::Fields::Unit => {
                     *fields = syn::Fields::Named(syn::FieldsNamed {
                         brace_token: Default::default(),
-                        named: syn::punctuated::Punctuated::from_iter(Some(syn::Field {
-                            attrs: Default::default(),
-                            vis: vis_crate,
-                            ident: Some(field_name),
-                            colon_token: Default::default(),
-                            ty: field_ty,
-                        })),
+                        named: syn::punctuated::Punctuated::from_iter(Some(new_field)),
                     });
                 }
-                syn::Fields::Named(_) => todo!(),
+                syn::Fields::Named(fields) => {
+                    fields.named.push(new_field);
+                }
                 syn::Fields::Unnamed(_) => unimplemented!(),
             },
         }
