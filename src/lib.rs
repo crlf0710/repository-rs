@@ -515,4 +515,10 @@ pub mod entity {
 }
 
 pub use crate::repo::Storage;
-pub use repository_macros::*;
+pub use repository_macros::entity;
+pub use repository_macros::interned;
+#[cfg(feature = "keyed")]
+pub use repository_macros::keyed;
+#[cfg(not(feature = "keyed"))]
+pub use repository_macros::keyed_fallback as keyed;
+pub use repository_macros::repo;

@@ -871,23 +871,24 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
+struct KeyedValue {
+    key: syn::Ident,
+    colon: syn::Token![:],
+    value: syn::Expr,
+}
+
+impl syn::parse::Parse for KeyedValue {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        Ok(KeyedValue {
+            key: input.parse()?,
+            colon: input.parse()?,
+            value: input.parse()?,
+        })
+    }
+}
+
 #[proc_macro]
 pub fn keyed(input: TokenStream) -> TokenStream {
-    struct KeyedValue {
-        key: syn::Ident,
-        colon: syn::Token![:],
-        value: syn::Expr,
-    }
-
-    impl syn::parse::Parse for KeyedValue {
-        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-            Ok(KeyedValue {
-                key: input.parse()?,
-                colon: input.parse()?,
-                value: input.parse()?,
-            })
-        }
-    }
     let keyed_value = parse_macro_input!(input as KeyedValue);
     let key_str = syn::Lit::Str(syn::LitStr::new(
         &keyed_value.key.ident_text(),
@@ -899,6 +900,16 @@ pub fn keyed(input: TokenStream) -> TokenStream {
 
     quote! {
         #option_crate_name ::keyed_value::KeyedValue::<#key_str, _>::new(#value_expr)
+    }
+    .into()
+}
+
+#[proc_macro]
+pub fn keyed_fallback(input: TokenStream) -> TokenStream {
+    let keyed_value = parse_macro_input!(input as KeyedValue);
+    let value = keyed_value.value;
+    quote! {
+        (#value)
     }
     .into()
 }

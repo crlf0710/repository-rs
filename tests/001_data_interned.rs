@@ -3,7 +3,6 @@
 #[derive(Default)]
 struct Repo;
 
-#[cfg(feature = "keyed")]
 use repo::keyed as k;
 
 #[cfg_attr(feature = "keyed", repo::interned(data = NameData, keyed = true))]
@@ -22,12 +21,10 @@ fn test_0001() {
     let mut repo = Repo::default();
     let name1 = Name::with_data(NameData("Alice"), &mut repo);
     let name2 = Name::new("Bob", &mut repo);
-    #[cfg(feature = "keyed")]
-    let name3 = Name::new(&mut repo, k!(name: "Carol"));
+    let name3 = Name::new(k!(name: "Carol"), &mut repo);
     let name4 = Name::new("Bob", &mut repo);
     assert_eq!(name1.data(&repo), "Alice");
     assert_eq!(name2.name(&repo), "Bob");
-    #[cfg(feature = "keyed")]
     assert_eq!(*name3.name(&repo), *"Carol");
     assert_ne!(name1, name4, "different");
     assert_eq!(name2, name4, "same");
