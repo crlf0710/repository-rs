@@ -674,10 +674,10 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                     ),
                 });
                 let getter_ret_ty = if comp_def.always_mandatory {
-                    getter_ret_inner_ty
+                    getter_ret_inner_ty.clone()
                 } else {
                     let error_ty = error_ty_component_not_present.clone();
-                    getter_ret_inner_ty.wrap_ty_with_result(error_ty)
+                    getter_ret_inner_ty.clone().wrap_ty_with_result(error_ty)
                 };
                 let ref_getter_ret_ty = if comp_def.always_mandatory {
                     ref_getter_ret_inner_ty
@@ -733,7 +733,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                         quote!{{
                             #comp_expr
                             let __value = if let #comp_name{#field_name: value, ..} = __comp {
-                                value.clone()
+                                <#getter_ret_inner_ty as Clone>::clone(value)
                             } else {
                                 unreachable!()
                             };
@@ -748,7 +748,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
                         quote!{{
                             #comp_expr
                             let __value = if let #comp_name(#pattern) = __comp {
-                                value.clone()
+                                <#getter_ret_inner_ty as Clone>::clone(value)
                             } else {
                                 unreachable!()
                             };
