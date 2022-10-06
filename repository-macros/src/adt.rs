@@ -1,9 +1,14 @@
 use crate::utils;
 use crate::utils::IdentPair;
+use crate::utils::IdentText;
 use crate::utils::RetainOrTake;
 use crate::utils::StreamingIterator;
+use crate::utils::WithIndex;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use std::ops::Not;
+use syn::spanned::Spanned;
+use syn::ExprLit;
 
 #[derive(Clone, Copy)]
 pub(crate) enum ItemAdtRef<'a> {
@@ -408,6 +413,97 @@ impl GeneralizedField {
             | GeneralizedFieldFlags::Getter => false,
         }
     }
+
+    pub(crate) fn accessor_ident(&self, field_idx_in_variant: usize) -> syn::Ident {
+        if let Some(ident_pair) = &self.accessor {
+            ident_pair.snake_case_ident()
+        } else if let Some(ident) = &self.field.ident {
+            ident.clone()
+        } else {
+            syn::Ident::new_raw(&format!("field_{field_idx_in_variant}"), self.field.span())
+        }
+    }
+
+    pub(crate) fn key_ident(&self) -> Option<syn::Ident> {
+        if let Some(ident_pair) = &self.accessor {
+            Some(ident_pair.snake_case_ident())
+        } else if let Some(ident) = &self.field.ident {
+            Some(ident.clone())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn ctor_param_ty(
+        &self,
+        is_mandatory: bool,
+        use_keyed: bool,
+        repo_crate_ident: &syn::Ident,
+    ) -> syn::Type {
+        let inner;
+        let key = if use_keyed { self.key_ident() } else { None };
+        let keyed_inner;
+        if let Some(key) = key {
+            let default_span = key.span();
+            keyed_inner = syn::Type::ImplTrait(syn::TypeImplTrait {
+                impl_token: Default::default(),
+                bounds: syn::punctuated::Punctuated::from_iter(vec![syn::TypeParamBound::Trait(
+                    syn::TraitBound {
+                        path: syn::Path {
+                            leading_colon: None,
+                            segments: syn::punctuated::Punctuated::from_iter(vec![
+                                syn::PathSegment {
+                                    ident: syn::Ident::new("Into", default_span),
+                                    arguments: syn::PathArguments::AngleBracketed(
+                                        syn::AngleBracketedGenericArguments {
+                                            args: syn::punctuated::Punctuated::from_iter(
+                                                vec![syn::GenericArgument::Type(syn::Type::Path(
+                                                    syn::TypePath {
+                                                        qself: None,
+                                                        path: syn::Path {
+                                                            leading_colon: None,
+                                                            segments: syn::punctuated::Punctuated::from_iter(
+                                                                vec![
+                                                                    syn::PathSegment { ident: repo_crate_ident.clone(), arguments: Default::default() },
+                                                                    syn::PathSegment {  ident: syn::Ident::new("keyed_value", default_span), arguments: Default::default()},
+                                                                    syn::PathSegment {  ident: syn::Ident::new("KeyedValue", default_span), arguments:
+                                                                     syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments { colon2_token: Default::default(), lt_token: Default::default(),
+                                                                        args: syn::punctuated::Punctuated::from_iter(vec![
+                                                                            syn::GenericArgument::Const(syn::Expr::Lit(
+                                                                                ExprLit {
+                                                                                    attrs: Default::default(),
+                                                                                    lit: syn::Lit::Str(syn::LitStr::new(&key.ident_text(), default_span))
+                                                                                }
+                                                                            )),
+                                                                            syn::GenericArgument::Type(self.field.ty.clone())
+                                                                        ]), gt_token: Default::default() })
+                                                                    },
+                                                                ]
+                                                            ),
+                                                        },
+                                                    },
+                                                )),]
+                                            ),
+                                            colon2_token: Default::default(),
+                                            lt_token: Default::default(),
+                                            gt_token: Default::default(),
+                                        },
+                                    ),
+                                },
+                            ]),
+                        },
+                        modifier: syn::TraitBoundModifier::None,
+                        paren_token: Default::default(),
+                        lifetimes: Default::default(),
+                    },
+                )]),
+            });
+            inner = &keyed_inner;
+        } else {
+            inner = &self.field.ty;
+        }
+        utils::type_opt_if_not_mandatory(is_mandatory, &self.field.ty)
+    }
 }
 
 #[derive(Debug)]
@@ -420,11 +516,315 @@ pub(crate) struct AdtVariantDefinition {
 }
 
 impl AdtVariantDefinition {
-    pub(crate) fn default_ctor_fn_name(&self, default_span: proc_macro2::Span) -> syn::Ident {
+    pub(crate) fn default_ctor_fn_name(
+        &self,
+        ctor_prefix: &'static str,
+        default_span: proc_macro2::Span,
+    ) -> syn::Ident {
         if let Some(ident_pair) = &self.variant_name {
-            ident_from_combining!(ident_pair.span() => "new", ident_pair.snake_case)
+            ident_from_combining!(ident_pair.span() => ctor_prefix, ident_pair.snake_case)
         } else {
-            syn::Ident::new_raw("new", default_span)
+            syn::Ident::new_raw(ctor_prefix, default_span)
+        }
+    }
+
+    pub(crate) fn calc_transition_appending_mandatory_components(
+        &self,
+        existing: Option<&Self>,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let mut existing_components = Vec::new();
+        if let Some(existing) = existing {
+            existing_components.extend(existing.mandatory_components.iter().copied());
+            existing_components.extend(existing.optional_components.iter().copied());
+        }
+        self.mandatory_components
+            .iter()
+            .copied()
+            .filter(move |component_idx| existing_components.contains(component_idx).not())
+    }
+
+    pub(crate) fn calc_transition_appending_optional_components(
+        &self,
+        existing: Option<&Self>,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let mut existing_components = Vec::new();
+        if let Some(existing) = existing {
+            existing_components.extend(existing.mandatory_components.iter().copied());
+            existing_components.extend(existing.optional_components.iter().copied());
+        }
+        self.optional_components
+            .iter()
+            .copied()
+            .filter(move |component_idx| existing_components.contains(component_idx).not())
+    }
+
+    pub(crate) fn calc_transition_strengthen_from_optional_to_mandatory_components(
+        &self,
+        existing: Option<&Self>,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let mut existing_components = Vec::new();
+        if let Some(existing) = existing {
+            existing_components.extend(existing.optional_components.iter().copied());
+        }
+        self.mandatory_components
+            .iter()
+            .copied()
+            .filter(move |component_idx| existing_components.contains(component_idx))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn calc_transition_weaken_from_mandatory_to_optional_components(
+        &self,
+        existing: Option<&Self>,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let mut existing_components = Vec::new();
+        if let Some(existing) = existing {
+            existing_components.extend(existing.mandatory_components.iter().copied());
+        }
+        self.optional_components
+            .iter()
+            .copied()
+            .filter(move |component_idx| existing_components.contains(component_idx))
+    }
+
+    pub(crate) fn calc_transition_removal_optional_components(
+        &self,
+        existing: Option<&Self>,
+    ) -> impl Iterator<Item = usize> {
+        let mut new_components = Vec::new();
+        new_components.extend(self.mandatory_components.iter().copied());
+        new_components.extend(self.optional_components.iter().copied());
+
+        let mut existing_components = Vec::new();
+        if let Some(existing) = existing {
+            existing_components.extend(existing.optional_components.iter().copied());
+        }
+        existing_components
+            .into_iter()
+            .filter(move |component_idx| new_components.contains(component_idx).not())
+    }
+
+    pub(crate) fn calc_transition_removal_mandatory_components(
+        &self,
+        existing: Option<&Self>,
+    ) -> impl Iterator<Item = usize> {
+        let mut new_components = Vec::new();
+        new_components.extend(self.mandatory_components.iter().copied());
+        new_components.extend(self.optional_components.iter().copied());
+
+        let mut existing_components = Vec::new();
+        if let Some(existing) = existing {
+            existing_components.extend(existing.mandatory_components.iter().copied());
+        }
+        existing_components
+            .into_iter()
+            .filter(move |component_idx| new_components.contains(component_idx).not())
+    }
+}
+
+impl AdtVariantDefinition {
+    fn iter_owned_fields_with_index_in_components<'a>(
+        this: WithIndex<&Self>,
+        comp_def: &'a AdtComponentDefinition,
+    ) -> impl Iterator<Item = (usize, &'a GeneralizedField)> + 'a {
+        let var_def_idx = this.index();
+        let applicable_variants_pos = comp_def
+            .applicable_variants
+            .iter()
+            .position(|variant_idx_in_list| *variant_idx_in_list == var_def_idx)
+            .unwrap();
+
+        comp_def.fields.iter().map(move |field_def| {
+            let field_idx_in_variant =
+                field_def.indexes_in_applicable_variants[applicable_variants_pos];
+            (field_idx_in_variant, field_def)
+        })
+    }
+
+    pub(crate) fn build_entity_ctor(
+        this: WithIndex<&Self>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        repo_crate_ident: &syn::Ident,
+        default_span: proc_macro2::Span,
+        repo_ty: &syn::Path,
+        handle_vis: &syn::Visibility,
+        handle_ident: &syn::Ident,
+    ) -> proc_macro2::TokenStream {
+        let ctor_ident = this.default_ctor_fn_name("new", default_span);
+
+        let mandatory_list = this.calc_transition_appending_mandatory_components(None);
+        let optional_list = this.calc_transition_appending_optional_components(None);
+
+        let chained_list = mandatory_list
+            .map(|x| (x, true))
+            .chain(optional_list.map(|x| (x, false)))
+            .collect::<Vec<_>>();
+
+        let use_keyed = false;
+
+        let mut variant_ctor_param_list: Vec<
+            Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>,
+        > = Vec::new();
+        for (comp_def_idx, comp_is_mandatory) in chained_list.iter().copied() {
+            let comp_def = &comp_defs[comp_def_idx];
+            for (field_idx_in_variant, field_def) in
+                AdtVariantDefinition::iter_owned_fields_with_index_in_components(this, comp_def)
+            {
+                if field_idx_in_variant >= variant_ctor_param_list.len() {
+                    variant_ctor_param_list.resize_with(field_idx_in_variant + 1, Default::default);
+                }
+                assert!(variant_ctor_param_list[field_idx_in_variant].is_none());
+                let variant_ctor_param_ident = field_def.accessor_ident(field_idx_in_variant);
+                let variant_ctor_param_ty =
+                    field_def.ctor_param_ty(comp_is_mandatory, use_keyed, repo_crate_ident);
+
+                let variant_ctor_param_comp_def_idx = comp_def_idx;
+                let variant_ctor_param_comp_field_name = field_def.field.ident.clone();
+                variant_ctor_param_list[field_idx_in_variant] = Some((
+                    variant_ctor_param_ident,
+                    variant_ctor_param_ty,
+                    variant_ctor_param_comp_def_idx,
+                    variant_ctor_param_comp_field_name,
+                ));
+            }
+        }
+        let mut variant_ctor_build_comp_expr_list: Vec<(proc_macro2::TokenStream, bool)> =
+            Vec::new();
+        for (comp_def_idx, comp_is_mandatory) in chained_list {
+            let comp_def = &comp_defs[comp_def_idx];
+            let comp_name = comp_def.component_name.camel_case_ident();
+            let comp_def_index = syn::Index::from(comp_def_idx);
+            let comp_style = if comp_def.is_inherent {
+                AdtVariantCtorStyle::BraceNamed
+            } else {
+                this.ctor_style
+            };
+
+            let build_comp_expr = expr_build_adt(
+                comp_style,
+                comp_name.into(),
+                use_keyed,
+                !comp_is_mandatory,
+                variant_ctor_param_list
+                    .iter()
+                    .flat_map(|variant_ctor_param| {
+                        let (param_ident, _, param_comp_idx, param_field_name) =
+                            variant_ctor_param.as_ref()?;
+                        if *param_comp_idx != comp_def_idx {
+                            return None;
+                        }
+                        Some((param_field_name.as_ref(), param_ident))
+                    }),
+            );
+
+            // FIXME: tidy up the following
+            {
+                let ctor_comp_expr = if comp_def.is_inherent {
+                    assert!(comp_is_mandatory);
+                    assert!(comp_def.fields_named);
+                    quote! {
+                        let __id;
+                        {
+                            __id = __comp_list.#comp_def_index.allocate_next(#build_comp_expr);
+                        }
+                    }
+                } else {
+                    if comp_is_mandatory {
+                        quote! {{
+                            __comp_list.#comp_def_index.append(__id, #build_comp_expr);
+                        }}
+                    } else {
+                        quote! {{
+                            todo!();   // FIXME
+                        }}
+                    }
+                };
+                variant_ctor_build_comp_expr_list.push((ctor_comp_expr, comp_is_mandatory));
+            }
+        }
+
+        // FIXME: tidy up the following
+        {
+            let ctor_style = this.ctor_style;
+            let ctor_path = &this.ctor_path;
+            let ctor_args = if !use_keyed {
+                variant_ctor_param_list
+                    .iter()
+                    .map(|ctor_param| {
+                        let (ctor_param_ident, ctor_param_ty, _, _) = ctor_param.as_ref().unwrap();
+                        quote!(#ctor_param_ident: #ctor_param_ty,)
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                unimplemented!() // FIXME
+            };
+            let variant_ctor_build_comp_expr_list =
+                variant_ctor_build_comp_expr_list.into_iter().map(|x| x.0);
+            quote! {
+                #[allow(non_snake_case)]
+                #handle_vis fn #ctor_ident(#(#ctor_args)* __repo: &mut #repo_ty, ) -> Self {
+                    use #repo_crate_ident ::repo::Repo;
+                    let __comp_list = <#repo_ty as #repo_crate_ident ::component::HasComponentList<#handle_ident>>::component_list_mut(__repo);
+                    #(#variant_ctor_build_comp_expr_list)*
+                    let repo_id = __repo.repo_id();
+                    #handle_ident {
+                        repo_id,
+                        entity_id: __id
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn expr_build_adt<'a>(
+    adt_ctor_style: AdtVariantCtorStyle,
+    adt_ctor: syn::Path,
+    use_keyed: bool,
+    is_values_wrapped_in_some: bool,
+    param_list: impl Iterator<Item = (Option<&'a syn::Ident>, &'a syn::Ident)>,
+) -> proc_macro2::TokenStream {
+    match adt_ctor_style {
+        AdtVariantCtorStyle::BraceNamed => {
+            if !use_keyed {
+                let param_list = param_list
+                    .map(|(field_name, field_value)| {
+                        let field_name = field_name.unwrap();
+                        let field_value = if !is_values_wrapped_in_some {
+                            quote!(#field_value)
+                        } else {
+                            quote!((#field_value).unwrap())
+                        };
+                        quote!(#field_name: #field_value,)
+                    })
+                    .collect::<Vec<_>>();
+                quote!(
+                    #adt_ctor{#(#param_list)*}
+                )
+            } else {
+                unimplemented!() // FIXME
+            }
+        }
+        AdtVariantCtorStyle::ParenUnamed => {
+            let param_list = param_list
+                .map(|(field_name, field_value)| {
+                    assert!(field_name.is_none());
+                    let field_value = if !is_values_wrapped_in_some {
+                        quote!(#field_value)
+                    } else {
+                        quote!((#field_value).unwrap())
+                    };
+
+                    quote!(#field_value , )
+                })
+                .collect::<Vec<_>>();
+            quote!(
+                #adt_ctor(#(#param_list)*)
+            )
+        }
+        AdtVariantCtorStyle::Unit => {
+            assert!(param_list.count() == 0);
+            quote!(#adt_ctor)
         }
     }
 }
@@ -434,6 +834,16 @@ pub(crate) enum AdtVariantCtorStyle {
     BraceNamed,
     ParenUnamed,
     Unit,
+}
+
+impl AdtVariantCtorStyle {
+    pub(crate) fn from_non_unit_is_named(is_named: bool) -> Self {
+        if is_named {
+            AdtVariantCtorStyle::BraceNamed
+        } else {
+            AdtVariantCtorStyle::ParenUnamed
+        }
+    }
 }
 
 #[derive(Debug)]

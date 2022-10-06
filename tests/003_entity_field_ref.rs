@@ -30,7 +30,7 @@ impl IntWithoutClone {
 }
 
 #[test]
-fn test_0002() {
+fn test_0003() {
     let mut repo = Repo::default();
 
     let person = Person::new("Alice".to_string(), IntWithoutClone::new(24), &mut repo);

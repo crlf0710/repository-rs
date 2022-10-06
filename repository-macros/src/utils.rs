@@ -683,9 +683,45 @@ impl TyWrap for syn::Type {
     }
 }
 
+pub(crate) fn type_opt_if_not_mandatory(is_mandatory: bool, ty: &syn::Type) -> syn::Type {
+    if is_mandatory {
+        ty.clone()
+    } else {
+        ty.clone().wrap_ty_with_option()
+    }
+}
+
 pub(crate) enum Either<L, R> {
     Left(L),
     Right(R),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct WithIndex<T> {
+    index: usize,
+    inner: T,
+}
+
+impl<T> WithIndex<T> {
+    pub(crate) fn from_index_and_inner(index: usize, inner: T) -> Self {
+        WithIndex { index, inner }
+    }
+    pub(crate) fn index(&self) -> usize {
+        self.index
+    }
+}
+
+impl<T> std::ops::Deref for WithIndex<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<T> std::ops::DerefMut for WithIndex<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 pub(crate) trait StreamingIterator {

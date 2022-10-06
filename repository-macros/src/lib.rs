@@ -182,7 +182,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
         .iter()
         .enumerate()
         .map(|(var_def_idx, var_def)| {
-            let ctor_ident = var_def.default_ctor_fn_name(handle_ident.span());
+            let ctor_ident = var_def.default_ctor_fn_name("new", handle_ident.span());
             assert!(var_def.optional_components.is_empty());
             let mut ctor_param_list: Vec<Option<(syn::Ident, syn::Type, Option<syn::Ident>)>> =
                 Vec::new();
@@ -460,11 +460,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
             .collect::<Vec<_>>();
         let comp_name = comp_def.component_name.camel_case_ident();
         let comp_fields = adt::build_fields_from_field_iter(
-            if comp_def.fields_named {
-                adt::AdtVariantCtorStyle::BraceNamed
-            } else {
-                adt::AdtVariantCtorStyle::ParenUnamed
-            },
+            adt::AdtVariantCtorStyle::from_non_unit_is_named(comp_def.fields_named),
             comp_def.fields.iter().map(|x| x.field.clone()),
         );
 
@@ -494,156 +490,21 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
         component_storage_new_expr.push(storage_new_expr);
     }
 
-    let ctor_definitions = var_defs
-        .iter()
-        .enumerate()
-        .map(|(var_def_idx, var_def)| {
-            let ctor_ident = var_def.default_ctor_fn_name(handle_ident.span());
-            let mut ctor_param_list: Vec<Option<(syn::Ident, syn::Type, Option<syn::Ident>, usize)>> =
-                Vec::new();
-            let mut ctor_comp_expr_list: Vec<proc_macro2::TokenStream> = Vec::new();
-            for (comp_def_idx, comp_is_mandatory) in var_def
-                .mandatory_components
-                .iter()
-                .map(|x| (*x, true))
-                .chain(var_def.optional_components.iter().map(|x| (*x, false)))
-            {
-                let comp_def = &comp_defs[comp_def_idx];
-                let applicable_variants_pos = comp_def
-                    .applicable_variants
-                    .iter()
-                    .position(|variant_idx_in_list| *variant_idx_in_list == var_def_idx)
-                    .unwrap();
-                for field_def in comp_def.fields.iter() {
-                    let ctor_param_pos =
-                        field_def.indexes_in_applicable_variants[applicable_variants_pos];
-                    if ctor_param_pos >= ctor_param_list.len() {
-                        ctor_param_list.resize_with(ctor_param_pos + 1, Default::default);
-                    }
-                    assert!(ctor_param_list[ctor_param_pos].is_none());
-                    let ctor_param_ident = if let Some(ident_pair) = &field_def.accessor {
-                        ident_pair.snake_case_ident()
-                    } else if let Some(ident) = &field_def.field.ident {
-                        ident.clone()
-                    } else {
-                        syn::Ident::new_raw(
-                            &format!("field_{ctor_param_pos}"),
-                            field_def.field.span(),
-                        )
-                    };
-                    let ctor_param_inner_ty = field_def.field.ty.clone();
-                    let ctor_param_ty = if comp_is_mandatory {
-                        ctor_param_inner_ty
-                    } else {
-                        ctor_param_inner_ty.wrap_ty_with_option()
-                    };
-                    let ctor_param_field_name = field_def.field.ident.clone();
-                    ctor_param_list[ctor_param_pos] =
-                        Some((ctor_param_ident, ctor_param_ty, ctor_param_field_name, comp_def_idx));
-                }
+    let mut ctor_definitions = Vec::new();
 
-                let use_keyed = false;
-                let comp_name = comp_def.component_name.camel_case_ident();
-                let comp_def_index = syn::Index::from(comp_def_idx);
-                let comp_style = if comp_def.is_inherent {
-                    adt::AdtVariantCtorStyle::BraceNamed
-                } else {
-                    var_def.ctor_style
-                };
-                let comp_expr = match comp_style {
-                    adt::AdtVariantCtorStyle::BraceNamed => {
-                        let comp_args = if !use_keyed {
-                            ctor_param_list
-                                .iter()
-                                .flat_map(|ctor_param| {
-                                    let (ctor_param_ident, _, ctor_param_field_name, ctor_param_comp_idx) =
-                                        ctor_param.as_ref().unwrap();
-                                    if *ctor_param_comp_idx != comp_def_idx{
-                                        return None;
-                                    }
-                                    let ctor_param_field_name = ctor_param_field_name.as_ref().unwrap();
-                                    Some(quote!(#ctor_param_field_name: #ctor_param_ident,))
-                                })
-                                .collect::<Vec<_>>()
-                        } else {
-                            unimplemented!() // FIXME
-                        };
-                        quote!(
-                            #comp_name{#(#comp_args)*}
-                        )
-                    }
-                    adt::AdtVariantCtorStyle::ParenUnamed => {
-                        let comp_args = ctor_param_list
-                            .iter()
-                            .flat_map(|ctor_param| {
-                                let (ctor_param_ident, _, _, ctor_param_comp_idx) = ctor_param.as_ref().unwrap();
-                                if *ctor_param_comp_idx != comp_def_idx{
-                                    return None;
-                                }
-                                Some(quote!(#ctor_param_ident , ))
-                            })
-                            .collect::<Vec<_>>();
-                        quote!(
-                            #comp_name(#(#comp_args)*)
-                        )
-                    }
-                    adt::AdtVariantCtorStyle::Unit => quote!(
-                        #comp_name
-                    ),
-                };
-
-                let ctor_comp_expr = if comp_def.is_inherent {
-                    assert!(comp_is_mandatory);
-                    assert!(comp_def.fields_named);
-                    quote! {
-                        let __id;
-                        {
-                            __id = __comp_list.#comp_def_index.allocate_next(#comp_expr);
-                        }
-                    }
-                } else {
-                    if comp_is_mandatory {
-                        quote! {{
-                            __comp_list.#comp_def_index.append(__id, #comp_expr);
-                        }}
-                    } else {
-                        quote! {{
-                            todo!();   // FIXME
-                        }}
-                    }
-                };
-                ctor_comp_expr_list.push(ctor_comp_expr);
-            }
-
-            let use_keyed = false;
-            let ctor_style = var_def.ctor_style;
-            let ctor_path = &var_def.ctor_path;
-            let ctor_args = if !use_keyed {
-                ctor_param_list
-                    .iter()
-                    .map(|ctor_param| {
-                        let (ctor_param_ident, ctor_param_ty, _, _) = ctor_param.as_ref().unwrap();
-                        quote!(#ctor_param_ident: #ctor_param_ty,)
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                unimplemented!() // FIXME
-            };
-            quote! {
-                #[allow(non_snake_case)]
-                #handle_vis fn #ctor_ident(#(#ctor_args)* __repo: &mut #repo_ty, ) -> Self {
-                    use #option_crate_name ::repo::Repo;
-                    let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list_mut(__repo);
-                    #(#ctor_comp_expr_list)*
-                    let repo_id = __repo.repo_id();
-                    #handle_ident {
-                        repo_id,
-                        entity_id: __id
-                    }
-                }
-            }
-        })
-        .collect::<Vec<_>>();
+    for (var_def_idx, var_def) in var_defs.iter().enumerate() {
+        let var_def = utils::WithIndex::from_index_and_inner(var_def_idx, var_def);
+        let ctor_definition = adt::AdtVariantDefinition::build_entity_ctor(
+            var_def,
+            &comp_defs,
+            &option_crate_name,
+            handle_ident.span(),
+            &repo_ty,
+            &handle_vis,
+            &handle_ident,
+        );
+        ctor_definitions.push(ctor_definition);
+    }
 
     let accessor_definitions = comp_defs
         .iter()
