@@ -623,6 +623,7 @@ where
 
 pub(crate) trait TyWrap {
     fn wrap_ty_with_shared_ref(self) -> Self;
+    fn wrap_ty_with_unique_ref(self) -> Self;
     fn wrap_ty_with_option(self) -> Self;
     fn wrap_ty_with_result(self, error_ty: Self) -> Self;
 }
@@ -633,6 +634,15 @@ impl TyWrap for syn::Type {
             and_token: Default::default(),
             lifetime: Default::default(),
             mutability: None,
+            elem: Box::new(self),
+        })
+    }
+
+    fn wrap_ty_with_unique_ref(self) -> Self {
+        syn::Type::Reference(syn::TypeReference {
+            and_token: Default::default(),
+            lifetime: Default::default(),
+            mutability: Some(<syn::Token![mut]>::default()),
             elem: Box::new(self),
         })
     }

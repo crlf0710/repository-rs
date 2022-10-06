@@ -377,7 +377,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                 use #option_crate_name ::repo::Repo;
                 assert_eq!(self.repo_id, repo.repo_id());
                 let component = <#repo_ty as #option_crate_name ::component::HasComponent<#data_ident>>::component_storage(repo);
-                <_ as #option_crate_name ::component::ComponentStorage<#repo_ty>>::data_by_id(component, self.interned_id)
+                <_ as #option_crate_name ::component::ComponentStorage<#repo_ty>>::data_by_id(component, self.interned_id).unwrap()
             }
         }
 
@@ -406,8 +406,8 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
         impl #option_crate_name ::component::ComponentStorage<#repo_ty> for #data_storage {
             type Data = #data_ident;
 
-            fn data_by_id(&self, id: #option_crate_name ::id::Id) -> &Self::Data {
-                self.get(id)
+            fn data_by_id(&self, id: #option_crate_name ::id::Id) -> Option<&Self::Data> {
+                self.checked_get(id)
             }
         }
 
@@ -450,7 +450,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut component_storages: Vec<TokenStream2> = Vec::new();
     let mut component_storage_new_expr: Vec<TokenStream2> = Vec::new();
 
-    for comp_def in comp_defs.iter() {
+    for (comp_def_idx, comp_def) in comp_defs.iter().enumerate() {
         let mut comp_attrs = item
             .attrs()
             .iter()
@@ -474,10 +474,6 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
             semi_token: Default::default(),
         };
 
-        component_definitions.push(quote! {
-            #comp_def_struct
-        });
-
         let (storage, storage_new_expr) = adt::component_storage_ty_and_build_expr(
             adt::AdtKind::Entity,
             &option_crate_name,
@@ -486,6 +482,36 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
             comp_def.is_inherent,
             comp_def.always_mandatory,
         );
+        let comp_def_index = syn::Index::from(comp_def_idx);
+
+        component_definitions.push(quote! {
+            #comp_def_struct
+
+            impl #option_crate_name ::component::HasComponent<#comp_name> for #repo_ty {
+                type Storage = #storage;
+
+                fn component_storage(&self) -> &Self::Storage {
+                    let component_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list(self);
+                    &component_list.#comp_def_index
+                }
+                fn component_storage_mut(&mut self) -> &mut Self::Storage {
+                    let component_list_mut = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list_mut(self);
+                    &mut component_list_mut.#comp_def_index
+                }
+            }
+
+            impl #option_crate_name ::component::Component<#repo_ty> for #comp_name {
+
+            }
+
+            impl #option_crate_name ::component::ComponentStorage<#repo_ty> for #storage {
+                type Data = #comp_name;
+    
+                fn data_by_id(&self, id: #option_crate_name ::id::Id) -> Option<&Self::Data> {
+                    self.checked_get(id)
+                }
+            }
+        });
         component_storages.push(storage);
         component_storage_new_expr.push(storage_new_expr);
     }
@@ -506,200 +532,23 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
         ctor_definitions.push(ctor_definition);
     }
 
-    let accessor_definitions = comp_defs
-        .iter()
-        .enumerate()
-        .flat_map(|(comp_def_idx, comp_def)| {
-            let option_crate_name = option_crate_name.clone();
-            let repo_ty = repo_ty.clone();
-            let handle_ident = handle_ident.clone();
-            comp_def.fields.iter().map(move |field_def| {
-                let accessor_ident = if let Some(ident_pair) = &field_def.accessor {
-                    ident_pair.snake_case_ident()
-                } else if let Some(ident) = &field_def.field.ident {
-                    ident.clone()
-                } else {
-                    return quote! {};
-                };
-                let accessor_setter_ident = ident_from_combining!(accessor_ident.span() => "set", accessor_ident);
-                let accessor_vis = field_def.vis();
-                let getter_ret_inner_ty = field_def.field.ty.clone();
-                let ref_getter_ret_inner_ty = field_def.field.ty.clone().wrap_ty_with_shared_ref();
-                let setter_ret_inner_ty = type_unit(proc_macro2::Span::call_site());
-                let setter_input_ty = field_def.field.ty.clone();
-                let error_ty_component_not_present = syn::Type::Path(syn::TypePath {
-                    qself: None,
-                    path: path_repo_error_component_not_present(
-                        field_def.field.ty.span(),
-                        option_crate_name.clone(),
-                    ),
-                });
-                let getter_ret_ty = if comp_def.always_mandatory {
-                    getter_ret_inner_ty.clone()
-                } else {
-                    let error_ty = error_ty_component_not_present.clone();
-                    getter_ret_inner_ty.clone().wrap_ty_with_result(error_ty)
-                };
-                let ref_getter_ret_ty = if comp_def.always_mandatory {
-                    ref_getter_ret_inner_ty
-                } else {
-                    let error_ty = error_ty_component_not_present.clone();
-                    ref_getter_ret_inner_ty.wrap_ty_with_result(error_ty)
-                };
-                let setter_ret_ty = if comp_def.always_mandatory {
-                    setter_ret_inner_ty
-                } else {
-                    let error_ty = error_ty_component_not_present.clone();
-                    setter_ret_inner_ty.wrap_ty_with_result(error_ty)
-                };
+    let mut accessor_definitions = Vec::new();
 
+    for (comp_def_idx, comp_def) in comp_defs.iter().enumerate() {
+        assert!(!comp_def.applicable_variants.is_empty());
+        for (field_idx, field_def) in comp_def.fields.iter().enumerate() {
+            let accessor_definition = adt::GeneralizedField::build_entity_accessor(
+                utils::WithIndex::from_index_and_inner(field_idx, field_def),
+                &option_crate_name,
+                handle_ident.span(),
+                &repo_ty,
+                &comp_def.component_name.camel_case_ident().into(),
+                comp_def.always_mandatory,
+            );
+            accessor_definitions.push(accessor_definition);
+        }
+    }
 
-                assert!(!comp_def.applicable_variants.is_empty());
-                let comp_name = comp_def.component_name.camel_case_ident();
-                let is_named = field_def.field.ident.is_some();
-                let comp_def_index = syn::Index::from(comp_def_idx);
-                let (comp_expr, comp_mut_expr, ret_expr) = if comp_def.always_mandatory {
-                    (
-                        quote! {
-                            let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list(__repo);
-                            let __comp = __comp_list.#comp_def_index.get(self.entity_id);
-                        },
-                        quote! {
-                            let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list_mut(__repo);
-                            let __comp = __comp_list.#comp_def_index.get_mut(self.entity_id);
-                        },
-                        quote! {
-                            __value
-                        }
-                    )
-                } else {
-                    let error_ty = error_ty_component_not_present.clone();
-                    (
-                        quote! {
-                            let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list(__repo);
-                            let __comp = __comp_list.#comp_def_index.get(self.entity_id).ok_or(#error_ty)?;
-                        },
-                        quote! {
-                            let __comp_list = <#repo_ty as #option_crate_name ::component::HasComponentList<#handle_ident>>::component_list_mut(__repo);
-                            let __comp = __comp_list.#comp_def_index.get_mut(self.entity_id).ok_or(#error_ty)?;
-                        },
-                        quote! {
-                            Ok(__value)
-                        }
-                    )
-                };
-                let getter_expr = {
-                    if is_named {
-                        let field_name = field_def.field.ident.as_ref().unwrap();
-                        quote!{{
-                            #comp_expr
-                            let __value = if let #comp_name{#field_name: value, ..} = __comp {
-                                <#getter_ret_inner_ty as Clone>::clone(value)
-                            } else {
-                                unreachable!()
-                            };
-                            #ret_expr
-                        }}
-                    } else {
-                        let mut pattern = TokenStream2::new();
-                        for _ in 0..field_def.indexes_in_applicable_variants[0] {
-                            pattern.extend(quote!(_,));
-                        }
-                        pattern.extend(quote!(value, ..));
-                        quote!{{
-                            #comp_expr
-                            let __value = if let #comp_name(#pattern) = __comp {
-                                <#getter_ret_inner_ty as Clone>::clone(value)
-                            } else {
-                                unreachable!()
-                            };
-                            #ret_expr
-                        }}
-                    }
-                };
-                let ref_getter_expr = {
-                    if is_named {
-                        let field_name = field_def.field.ident.as_ref().unwrap();
-                        quote!{{
-                            #comp_expr
-                            let __value = if let #comp_name{#field_name: value, ..} = __comp {
-                                value
-                            } else {
-                                unreachable!()
-                            };
-                            #ret_expr
-                        }}
-                    } else {
-                        let mut pattern = TokenStream2::new();
-                        for _ in 0..field_def.indexes_in_applicable_variants[0] {
-                            pattern.extend(quote!(_,));
-                        }
-                        pattern.extend(quote!(value, ..));
-                        quote!{{
-                            #comp_expr
-                            let __value = if let #comp_name(#pattern) = __comp {
-                                value
-                            } else {
-                                unreachable!()
-                            };
-                            #ret_expr
-                        }}
-                    }
-                };
-                let setter_expr  = {
-                    if is_named {
-                        let field_name = field_def.field.ident.as_ref().unwrap();
-                        quote!{{
-                            #comp_mut_expr
-                            __comp.#field_name = value;
-                            let __value = ();
-                            #ret_expr
-                        }}
-                    } else {
-                        let idx = syn::Index::from(field_def.indexes_in_applicable_variants[0]);
-                        quote!{{
-                            #comp_mut_expr
-                            __comp.#idx = value;
-                            let __value = ();
-                            #ret_expr
-                        }}
-                    }
-                };
-                let getter_impl = if field_def.has_getter() {
-                    quote! {
-                        #accessor_vis fn #accessor_ident(self, __repo: &#repo_ty) -> #getter_ret_ty {
-                            #getter_expr
-                        }
-                    }
-                } else {
-                    quote! {}
-                };
-                let ref_getter_impl = if field_def.has_ref_getter() {
-                    quote! {
-                        #accessor_vis fn #accessor_ident(self, __repo: &#repo_ty) -> #ref_getter_ret_ty {
-                            #ref_getter_expr
-                        }
-                    }
-                } else {
-                    quote! {}
-                };
-                let setter_impl = if field_def.has_setter() {
-                    quote! {
-                        #accessor_vis fn #accessor_setter_ident(self, value: #setter_input_ty, __repo: &mut #repo_ty) -> #setter_ret_ty {
-                            #setter_expr
-                        }
-                    }
-                } else {
-                    quote! {}
-                };
-                quote! {
-                    #getter_impl
-                    #ref_getter_impl
-                    #setter_impl
-                }
-            })
-        })
-        .collect::<Vec<_>>();
     let handle_definition = quote! {
         #[derive(Copy, Clone, PartialEq, Debug)]
         #handle_vis struct #handle_ident {

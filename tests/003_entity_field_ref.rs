@@ -44,4 +44,8 @@ fn test_0003() {
     age.set(25);
 
     assert_eq!(person.age(&repo).get(), 25);
+
+    *person.age_mut(&mut repo) = IntWithoutClone::new(26);
+
+    assert_eq!(person.age(&repo).get(), 26);
 }

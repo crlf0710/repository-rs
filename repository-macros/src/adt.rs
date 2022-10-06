@@ -3,6 +3,7 @@ use crate::utils::IdentPair;
 use crate::utils::IdentText;
 use crate::utils::RetainOrTake;
 use crate::utils::StreamingIterator;
+use crate::utils::TyWrap;
 use crate::utils::WithIndex;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
@@ -414,11 +415,22 @@ impl GeneralizedField {
         }
     }
 
-    pub(crate) fn accessor_ident(&self, field_idx_in_variant: usize) -> syn::Ident {
+    pub(crate) fn accessor_ident(&self) -> Option<syn::Ident> {
         if let Some(ident_pair) = &self.accessor {
-            ident_pair.snake_case_ident()
+            Some(ident_pair.snake_case_ident())
         } else if let Some(ident) = &self.field.ident {
-            ident.clone()
+            Some(ident.clone())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn accessor_or_generative_naming_ident(
+        &self,
+        field_idx_in_variant: usize,
+    ) -> syn::Ident {
+        if let Some(ident) = self.accessor_ident() {
+            ident
         } else {
             syn::Ident::new_raw(&format!("field_{field_idx_in_variant}"), self.field.span())
         }
@@ -503,6 +515,195 @@ impl GeneralizedField {
             inner = &self.field.ty;
         }
         utils::type_opt_if_not_mandatory(is_mandatory, &self.field.ty)
+    }
+
+    pub(crate) fn build_entity_accessor(
+        this: WithIndex<&Self>,
+        repo_crate_ident: &syn::Ident,
+        default_span: proc_macro2::Span,
+        repo_ty: &syn::Path,
+        comp_ty: &syn::Path,
+        is_mandatory: bool,
+    ) -> proc_macro2::TokenStream {
+        let Some(accessor_ident) = this.accessor_ident() else {
+            return proc_macro2::TokenStream::new();
+        };
+        let accessor_vis = this.vis();
+        let error_ty_component_not_present = syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: crate::path_repo_error_component_not_present(
+                this.field.ty.span(),
+                repo_crate_ident.clone(),
+            ),
+        });
+        #[derive(Clone, Copy)]
+        enum SubAccessor {
+            Getter,
+            RefGetter,
+            RefMutGetter,
+            Setter,
+        }
+        let extra_input_ident = syn::Ident::new("value", accessor_ident.span());
+        let repo_input_ident = syn::Ident::new("repo", accessor_ident.span());
+
+        let mut result = TokenStream2::new();
+
+        let field_is_named = this.field.ident.is_some();
+
+        let getter_tokens = if field_is_named {
+            let field_name = this.field.ident.as_ref().unwrap();
+            quote!(let #comp_ty{#field_name: value, ..} = __comp)
+        } else {
+            let mut pattern = TokenStream2::new();
+            for _ in 0..this.index() {
+                pattern.extend(quote!(_,));
+            }
+            pattern.extend(quote!(value, ..));
+            quote!(let #comp_ty(#pattern) = __comp)
+        };
+        let setter_token = if field_is_named {
+            let field_name = this.field.ident.as_ref().unwrap();
+            quote!(#field_name)
+        } else {
+            let idx = syn::Index::from(this.index());
+            quote!(#idx)
+        };
+
+        for subaccessor in [
+            SubAccessor::Getter,
+            SubAccessor::RefGetter,
+            SubAccessor::RefMutGetter,
+            SubAccessor::Setter,
+        ] {
+            let subaccessor_exist = match subaccessor {
+                SubAccessor::Getter => this.has_getter(),
+                SubAccessor::RefGetter => this.has_ref_getter(),
+                SubAccessor::RefMutGetter => this.has_ref_getter(),
+                SubAccessor::Setter => this.has_setter(),
+            };
+            if !subaccessor_exist {
+                continue;
+            }
+            let subaccessor_ident = match subaccessor {
+                SubAccessor::Getter => accessor_ident.clone(),
+                SubAccessor::RefGetter => accessor_ident.clone(),
+                SubAccessor::RefMutGetter => {
+                    ident_from_combining!(accessor_ident.span() => accessor_ident, "mut")
+                }
+                SubAccessor::Setter => {
+                    ident_from_combining!(accessor_ident.span() => "set", accessor_ident)
+                }
+            };
+
+            let subaccessor_input = match subaccessor {
+                SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::RefMutGetter => None,
+                SubAccessor::Setter => Some(this.field.ty.clone()),
+            };
+
+            let subaccessor_extra_input = match &subaccessor_input {
+                Some(ty) => quote!(#extra_input_ident : #ty,),
+                _ => quote!(),
+            };
+
+            let subaccessor_repo_input = match subaccessor {
+                SubAccessor::Getter | SubAccessor::RefGetter => {
+                    quote!(#repo_input_ident: &#repo_ty)
+                }
+                SubAccessor::RefMutGetter | SubAccessor::Setter => {
+                    quote!(#repo_input_ident: &mut #repo_ty)
+                }
+            };
+
+            let subaccessor_output_ty = match subaccessor {
+                SubAccessor::Getter => this.field.ty.clone(),
+                SubAccessor::RefGetter => this.field.ty.clone().wrap_ty_with_shared_ref(),
+                SubAccessor::RefMutGetter => this.field.ty.clone().wrap_ty_with_unique_ref(),
+                SubAccessor::Setter => crate::type_unit(default_span),
+            };
+
+            let subaccessor_result_ty = if is_mandatory {
+                subaccessor_output_ty.clone()
+            } else {
+                subaccessor_output_ty
+                    .clone()
+                    .wrap_ty_with_result(error_ty_component_not_present.clone())
+            };
+
+            let prepare_comp_stmt = match (subaccessor, is_mandatory) {
+                (SubAccessor::Getter | SubAccessor::RefGetter, true) => {
+                    quote! {
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage(#repo_input_ident);
+                        let __comp = __comp_storage.get(self.entity_id);
+                    }
+                }
+                (SubAccessor::Getter | SubAccessor::RefGetter, false) => {
+                    quote! {
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage(#repo_input_ident);
+                        let __comp = __comp_storage.get(self.entity_id).ok_or(#error_ty_component_not_present)?;
+                    }
+                }
+                (SubAccessor::RefMutGetter | SubAccessor::Setter, true) => {
+                    quote! {
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
+                        let __comp = __comp_storage.get_mut(self.entity_id);
+                    }
+                }
+                (SubAccessor::RefMutGetter | SubAccessor::Setter, false) => {
+                    quote! {
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
+                        let __comp = __comp_storage.get_mut(self.entity_id).ok_or(#error_ty_component_not_present)?;
+                    }
+                }
+            };
+            let subaccessor_body_stmt = {
+                match subaccessor {
+                    SubAccessor::Getter => {
+                        quote! {
+                            let __value = if #getter_tokens {
+                                <#subaccessor_output_ty as Clone>::clone(value)
+                            } else {
+                                unreachable!()
+                            };
+                        }
+                    }
+                    SubAccessor::RefGetter | SubAccessor::RefMutGetter => {
+                        quote! {
+                            let __value = if #getter_tokens {
+                                value
+                            } else {
+                                unreachable!()
+                            };
+                        }
+                    }
+                    SubAccessor::Setter => {
+                        quote! {
+                            __comp.#setter_token = #extra_input_ident;
+                            let __value = ();
+                        }
+                    }
+                }
+            };
+
+            let ret_expr = if is_mandatory {
+                quote! {
+                    __value
+                }
+            } else {
+                quote! {
+                    Ok(__value)
+                }
+            };
+
+            let subaccesor_impl = quote!(
+                #accessor_vis fn #subaccessor_ident(self, #subaccessor_extra_input #subaccessor_repo_input) -> #subaccessor_result_ty {
+                    #prepare_comp_stmt
+                    #subaccessor_body_stmt
+                    #ret_expr
+                }
+            );
+            result.extend(subaccesor_impl);
+        }
+        result
     }
 }
 
@@ -674,7 +875,8 @@ impl AdtVariantDefinition {
                     variant_ctor_param_list.resize_with(field_idx_in_variant + 1, Default::default);
                 }
                 assert!(variant_ctor_param_list[field_idx_in_variant].is_none());
-                let variant_ctor_param_ident = field_def.accessor_ident(field_idx_in_variant);
+                let variant_ctor_param_ident =
+                    field_def.accessor_or_generative_naming_ident(field_idx_in_variant);
                 let variant_ctor_param_ty =
                     field_def.ctor_param_ty(comp_is_mandatory, use_keyed, repo_crate_ident);
 

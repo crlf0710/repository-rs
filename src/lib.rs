@@ -247,11 +247,11 @@ pub mod component {
 
     pub trait ComponentStorage<R: Repo> {
         type Data;
-        fn data_by_id(&self, id: Id) -> &Self::Data;
+        fn data_by_id(&self, id: Id) -> Option<&Self::Data>;
     }
 
     pub trait ComponentStorageMut<R: Repo>: ComponentStorage<R> {
-        fn data_by_id_mut(&self, id: Id) -> &mut Self::Data;
+        fn data_by_id_mut(&self, id: Id) -> Option<&mut Self::Data>;
     }
 }
 
@@ -295,6 +295,11 @@ pub mod component_storage {
         #[inline]
         pub fn get(&self, id: Id) -> &D {
             self.data.get_index(id.0.get() - 1).unwrap()
+        }
+
+        #[inline]
+        pub fn checked_get(&self, id: Id) -> Option<&D> {
+            self.data.get_index(id.0.get() - 1)
         }
     }
 
@@ -349,6 +354,11 @@ pub mod component_storage {
         pub fn get(&self, id: Id) -> &D {
             self.inner.get(id)
         }
+
+        #[inline]
+        pub fn checked_get(&self, id: Id) -> Option<&D> {
+            self.inner.checked_get(id)
+        }
     }
 
     pub struct DenseStorage<D> {
@@ -358,6 +368,13 @@ pub mod component_storage {
     impl<D> DenseStorage<D> {
         pub fn new() -> Self {
             DenseStorage { data: Vec::new() }
+        }
+
+        #[inline]
+        pub fn append(&mut self, id: Id, d: D) {
+            let idx = id.0.get() - 1;
+            assert_eq!(idx, self.data.len());
+            self.data.push(d);
         }
 
         #[inline]
@@ -371,10 +388,8 @@ pub mod component_storage {
         }
 
         #[inline]
-        pub fn append(&mut self, id: Id, d: D) {
-            let idx = id.0.get() - 1;
-            assert_eq!(idx, self.data.len());
-            self.data.push(d);
+        pub fn checked_get(&self, id: Id) -> Option<&D> {
+            self.data.get((id.0.get() - 1))
         }
     }
 
@@ -388,6 +403,17 @@ pub mod component_storage {
                 data: BTreeMap::new(),
             }
         }
+
+        #[inline]
+        pub fn append(&mut self, id: Id, d: D) {
+            use std::collections::btree_map::Entry;
+            let entry = self.data.entry(id.0.get() - 1);
+            if matches!(entry, Entry::Occupied(..)) {
+                unreachable!();
+            }
+            entry.or_insert(d);
+        }
+
         #[inline]
         pub fn get(&self, id: Id) -> Option<&D> {
             self.data.get(&(id.0.get() - 1))
@@ -399,13 +425,8 @@ pub mod component_storage {
         }
 
         #[inline]
-        pub fn append(&mut self, id: Id, d: D) {
-            use std::collections::btree_map::Entry;
-            let entry = self.data.entry(id.0.get() - 1);
-            if matches!(entry, Entry::Occupied(..)) {
-                unreachable!();
-            }
-            entry.or_insert(d);
+        pub fn checked_get(&self, id: Id) -> Option<&D> {
+            self.get(id)
         }
     }
 
@@ -435,13 +456,18 @@ pub mod component_storage {
         }
 
         #[inline]
+        pub fn append(&mut self, id: Id, d: D) {
+            self.inner.append(id, d);
+        }
+
+        #[inline]
         pub fn get(&self, id: Id) -> &D {
             self.inner.get(id)
         }
 
         #[inline]
-        pub fn append(&mut self, id: Id, d: D) {
-            self.inner.append(id, d);
+        pub fn checked_get(&self, id: Id) -> Option<&D> {
+            self.inner.checked_get(id)
         }
     }
 }
