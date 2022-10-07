@@ -341,6 +341,7 @@ impl utils::StreamingIterator for GeneralizedVariantIterMut<'_> {
 pub(crate) struct GeneralizedField {
     pub(crate) field: syn::Field,
     pub(crate) accessor: Option<IdentPair>,
+    pub(crate) hidden_accessor: Option<IdentPair>,
     pub(crate) indexes_in_applicable_variants: Vec<usize>,
     pub(crate) flags: GeneralizedFieldFlags,
 }
@@ -371,10 +372,22 @@ impl GeneralizedField {
             [x] => Some(x.clone()),
             [x, y, ..] => return Err(syn::Error::new(y.span(), "multiple accessor specified")),
         };
+        let hidden_accessor = field
+            .attrs
+            .retain_or_take(|attr| !attr.path.is_ident("hidden_accessor"))
+            .map(|x| utils::GeneralizedMeta::parse_attribute(&x).and_then(|x| x.get_ident_value()))
+            .collect::<syn::Result<Vec<_>>>()?;
+        let hidden_accessor = match &hidden_accessor[..] {
+            [] => None,
+            [x] if accessor.is_some() => return Err(syn::Error::new(x.span(), "hidden_accessor cannot be specified together with accessor")),
+            [x] => Some(x.clone()),
+            [x, y, ..] => return Err(syn::Error::new(y.span(), "multiple hidden_accessor specified")),
+        };
         let field = GeneralizedField {
             field: field.clone(),
             indexes_in_applicable_variants: vec![index_in_first_applicable_variant],
             accessor: accessor.map(IdentPair::from_snake_case_ident),
+            hidden_accessor: hidden_accessor.map(IdentPair::from_snake_case_ident),
             flags,
         };
         Ok(field)
@@ -384,9 +397,9 @@ impl GeneralizedField {
         self.field.vis.clone()
     }
 
-    pub(crate) fn has_getter(&self) -> bool {
+    pub(crate) fn has_getter(&self, hidden: bool) -> bool {
         match self.flags {
-            GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => true,
+            GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => self.hidden_accessor.is_some() == hidden,
             GeneralizedFieldFlags::None
             | GeneralizedFieldFlags::RefGetter
             | GeneralizedFieldFlags::Setter
@@ -394,9 +407,9 @@ impl GeneralizedField {
         }
     }
 
-    pub(crate) fn has_ref_getter(&self) -> bool {
+    pub(crate) fn has_ref_getter(&self, hidden: bool) -> bool {
         match self.flags {
-            GeneralizedFieldFlags::RefGetter | GeneralizedFieldFlags::RefGetterAndSetter => true,
+            GeneralizedFieldFlags::RefGetter | GeneralizedFieldFlags::RefGetterAndSetter => self.hidden_accessor.is_some() == hidden,
             GeneralizedFieldFlags::None
             | GeneralizedFieldFlags::Getter
             | GeneralizedFieldFlags::Setter
@@ -404,11 +417,11 @@ impl GeneralizedField {
         }
     }
 
-    pub(crate) fn has_setter(&self) -> bool {
+    pub(crate) fn has_setter(&self, hidden: bool) -> bool {
         match self.flags {
             GeneralizedFieldFlags::Setter
             | GeneralizedFieldFlags::GetterAndSetter
-            | GeneralizedFieldFlags::RefGetterAndSetter => true,
+            | GeneralizedFieldFlags::RefGetterAndSetter => self.hidden_accessor.is_some() == hidden,
             GeneralizedFieldFlags::None
             | GeneralizedFieldFlags::RefGetter
             | GeneralizedFieldFlags::Getter => false,
@@ -422,6 +435,14 @@ impl GeneralizedField {
             Some(ident.clone())
         } else {
             None
+        }
+    }
+
+    pub(crate) fn hidden_accessor_ident(&self) -> Option<syn::Ident> {
+        if let Some(ident_pair) = &self.hidden_accessor {
+            Some(ident_pair.snake_case_ident())
+        } else {
+            self.accessor_ident()
         }
     }
 
@@ -522,12 +543,14 @@ impl GeneralizedField {
         repo_crate_ident: &syn::Ident,
         default_span: proc_macro2::Span,
         repo_ty: &syn::Path,
+        handle_ident: &syn::Ident,
         comp_ty: &syn::Path,
         is_mandatory: bool,
-    ) -> proc_macro2::TokenStream {
+    ) -> (TokenStream2, TokenStream2) {
         let Some(accessor_ident) = this.accessor_ident() else {
-            return proc_macro2::TokenStream::new();
+            return (TokenStream2::new(), TokenStream2::new());
         };
+        let hidden_accessor_ident = this.hidden_accessor_ident().unwrap_or_else(|| accessor_ident.clone());
         let accessor_vis = this.vis();
         let error_ty_component_not_present = syn::Type::Path(syn::TypePath {
             qself: None,
@@ -539,14 +562,20 @@ impl GeneralizedField {
         #[derive(Clone, Copy)]
         enum SubAccessor {
             Getter,
+            HiddenGetter,
             RefGetter,
+            HiddenRefGetter,
             RefMutGetter,
+            HiddenRefMutGetter,
             Setter,
+            HiddenSetter,
         }
-        let extra_input_ident = syn::Ident::new("value", accessor_ident.span());
-        let repo_input_ident = syn::Ident::new("repo", accessor_ident.span());
+        let extra_input_ident = syn::Ident::new("__value", accessor_ident.span());
+        let repo_input_ident = syn::Ident::new("__repo", accessor_ident.span());
+        let entity_input_ident = syn::Ident::new("__entity", accessor_ident.span());
 
-        let mut result = TokenStream2::new();
+        let mut result_inherent = TokenStream2::new();
+        let mut result_nonassoc = TokenStream2::new();
 
         let field_is_named = this.field.ident.is_some();
 
@@ -571,33 +600,50 @@ impl GeneralizedField {
 
         for subaccessor in [
             SubAccessor::Getter,
+            SubAccessor::HiddenGetter,
             SubAccessor::RefGetter,
+            SubAccessor::HiddenRefGetter,
             SubAccessor::RefMutGetter,
+            SubAccessor::HiddenRefMutGetter,
             SubAccessor::Setter,
+            SubAccessor::HiddenSetter,
         ] {
             let subaccessor_exist = match subaccessor {
-                SubAccessor::Getter => this.has_getter(),
-                SubAccessor::RefGetter => this.has_ref_getter(),
-                SubAccessor::RefMutGetter => this.has_ref_getter(),
-                SubAccessor::Setter => this.has_setter(),
+                SubAccessor::Getter => this.has_getter(false),
+                SubAccessor::HiddenGetter => this.has_getter(true),
+                SubAccessor::RefGetter => this.has_ref_getter(false),
+                SubAccessor::HiddenRefGetter => this.has_ref_getter(true),
+                SubAccessor::RefMutGetter => this.has_ref_getter(false),
+                SubAccessor::HiddenRefMutGetter => this.has_ref_getter(true),
+                SubAccessor::Setter => this.has_setter(false),
+                SubAccessor::HiddenSetter => this.has_setter(true),
             };
             if !subaccessor_exist {
                 continue;
             }
             let subaccessor_ident = match subaccessor {
                 SubAccessor::Getter => accessor_ident.clone(),
+                SubAccessor::HiddenGetter => hidden_accessor_ident.clone(),
                 SubAccessor::RefGetter => accessor_ident.clone(),
+                SubAccessor::HiddenRefGetter => hidden_accessor_ident.clone(),
                 SubAccessor::RefMutGetter => {
                     ident_from_combining!(accessor_ident.span() => accessor_ident, "mut")
+                }
+                SubAccessor::HiddenRefMutGetter => {
+                    ident_from_combining!(hidden_accessor_ident.span() => hidden_accessor_ident, "mut")
                 }
                 SubAccessor::Setter => {
                     ident_from_combining!(accessor_ident.span() => "set", accessor_ident)
                 }
+                SubAccessor::HiddenSetter => {
+                    ident_from_combining!(hidden_accessor_ident.span() => "set", hidden_accessor_ident)
+                }
             };
 
             let subaccessor_input = match subaccessor {
-                SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::RefMutGetter => None,
-                SubAccessor::Setter => Some(this.field.ty.clone()),
+                SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::RefMutGetter |
+                SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter | SubAccessor::HiddenRefMutGetter => None,
+                SubAccessor::Setter | SubAccessor::HiddenSetter => Some(this.field.ty.clone()),
             };
 
             let subaccessor_extra_input = match &subaccessor_input {
@@ -606,19 +652,19 @@ impl GeneralizedField {
             };
 
             let subaccessor_repo_input = match subaccessor {
-                SubAccessor::Getter | SubAccessor::RefGetter => {
+                SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter => {
                     quote!(#repo_input_ident: &#repo_ty)
                 }
-                SubAccessor::RefMutGetter | SubAccessor::Setter => {
+                SubAccessor::RefMutGetter | SubAccessor::Setter | SubAccessor::HiddenRefMutGetter | SubAccessor::HiddenSetter => {
                     quote!(#repo_input_ident: &mut #repo_ty)
                 }
             };
 
             let subaccessor_output_ty = match subaccessor {
-                SubAccessor::Getter => this.field.ty.clone(),
-                SubAccessor::RefGetter => this.field.ty.clone().wrap_ty_with_shared_ref(),
-                SubAccessor::RefMutGetter => this.field.ty.clone().wrap_ty_with_unique_ref(),
-                SubAccessor::Setter => crate::type_unit(default_span),
+                SubAccessor::Getter | SubAccessor::HiddenGetter => this.field.ty.clone(),
+                SubAccessor::RefGetter | SubAccessor::HiddenRefGetter => this.field.ty.clone().wrap_ty_with_shared_ref(),
+                SubAccessor::RefMutGetter | SubAccessor::HiddenRefMutGetter => this.field.ty.clone().wrap_ty_with_unique_ref(),
+                SubAccessor::Setter | SubAccessor::HiddenSetter => crate::type_unit(default_span),
             };
 
             let subaccessor_result_ty = if is_mandatory {
@@ -630,34 +676,34 @@ impl GeneralizedField {
             };
 
             let prepare_comp_stmt = match (subaccessor, is_mandatory) {
-                (SubAccessor::Getter | SubAccessor::RefGetter, true) => {
+                (SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter, true) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage(#repo_input_ident);
-                        let __comp = __comp_storage.get(self.entity_id);
+                        let __comp = __comp_storage.get(#entity_input_ident.entity_id);
                     }
                 }
-                (SubAccessor::Getter | SubAccessor::RefGetter, false) => {
+                (SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter, false) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage(#repo_input_ident);
-                        let __comp = __comp_storage.get(self.entity_id).ok_or(#error_ty_component_not_present)?;
+                        let __comp = __comp_storage.get(#entity_input_ident.entity_id).ok_or(#error_ty_component_not_present)?;
                     }
                 }
-                (SubAccessor::RefMutGetter | SubAccessor::Setter, true) => {
+                (SubAccessor::RefMutGetter | SubAccessor::Setter | SubAccessor::HiddenRefMutGetter | SubAccessor::HiddenSetter, true) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
-                        let __comp = __comp_storage.get_mut(self.entity_id);
+                        let __comp = __comp_storage.get_mut(#entity_input_ident.entity_id);
                     }
                 }
-                (SubAccessor::RefMutGetter | SubAccessor::Setter, false) => {
+                (SubAccessor::RefMutGetter | SubAccessor::Setter | SubAccessor::HiddenRefMutGetter | SubAccessor::HiddenSetter, false) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
-                        let __comp = __comp_storage.get_mut(self.entity_id).ok_or(#error_ty_component_not_present)?;
+                        let __comp = __comp_storage.get_mut(#entity_input_ident.entity_id).ok_or(#error_ty_component_not_present)?;
                     }
                 }
             };
             let subaccessor_body_stmt = {
                 match subaccessor {
-                    SubAccessor::Getter => {
+                    SubAccessor::Getter | SubAccessor::HiddenGetter => {
                         quote! {
                             let __value = if #getter_tokens {
                                 <#subaccessor_output_ty as Clone>::clone(value)
@@ -666,7 +712,7 @@ impl GeneralizedField {
                             };
                         }
                     }
-                    SubAccessor::RefGetter | SubAccessor::RefMutGetter => {
+                    SubAccessor::RefGetter | SubAccessor::RefMutGetter |  SubAccessor::HiddenRefGetter | SubAccessor::HiddenRefMutGetter => {
                         quote! {
                             let __value = if #getter_tokens {
                                 value
@@ -675,7 +721,7 @@ impl GeneralizedField {
                             };
                         }
                     }
-                    SubAccessor::Setter => {
+                    SubAccessor::Setter | SubAccessor::HiddenSetter => {
                         quote! {
                             __comp.#setter_token = #extra_input_ident;
                             let __value = ();
@@ -694,16 +740,38 @@ impl GeneralizedField {
                 }
             };
 
-            let subaccesor_impl = quote!(
-                #accessor_vis fn #subaccessor_ident(self, #subaccessor_extra_input #subaccessor_repo_input) -> #subaccessor_result_ty {
-                    #prepare_comp_stmt
-                    #subaccessor_body_stmt
-                    #ret_expr
-                }
-            );
-            result.extend(subaccesor_impl);
+            match subaccessor {
+                SubAccessor::Getter |
+                SubAccessor::RefGetter  |
+                SubAccessor::RefMutGetter |
+                SubAccessor::Setter => {
+                    let subaccesor_impl = quote!(
+                        #accessor_vis fn #subaccessor_ident(self, #subaccessor_extra_input #subaccessor_repo_input) -> #subaccessor_result_ty {
+                            let #entity_input_ident = self;
+                            #prepare_comp_stmt
+                            #subaccessor_body_stmt
+                            #ret_expr
+                        }
+                    );
+                    result_inherent.extend(subaccesor_impl);
+                },
+                SubAccessor::HiddenGetter |
+                SubAccessor::HiddenRefGetter |
+                SubAccessor::HiddenRefMutGetter |
+                SubAccessor::HiddenSetter => {
+                    let subaccesor_impl = quote!(
+                        fn #subaccessor_ident(#entity_input_ident: #handle_ident, #subaccessor_extra_input #subaccessor_repo_input) -> #subaccessor_result_ty {
+                            #prepare_comp_stmt
+                            #subaccessor_body_stmt
+                            #ret_expr
+                        }
+                    );
+                    result_nonassoc.extend(subaccesor_impl);
+                },
+            }
+            
         }
-        result
+        (result_inherent, result_nonassoc)
     }
 }
 

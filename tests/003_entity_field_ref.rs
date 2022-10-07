@@ -8,6 +8,7 @@ struct Repo;
 #[repo::entity]
 struct Person {
     #[inherent]
+    #[hidden_accessor = person_name]
     name: String,
     #[by_ref]
     age: IntWithoutClone,
@@ -35,7 +36,7 @@ fn test_0003() {
 
     let person = Person::new("Alice".to_string(), IntWithoutClone::new(24), &mut repo);
 
-    assert_eq!(&person.name(&repo), "Alice");
+    assert_eq!(person_name(person, &repo), "Alice");
 
     let age: &IntWithoutClone = person.age(&repo);
 

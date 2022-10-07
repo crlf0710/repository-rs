@@ -320,7 +320,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                 } else {
                     todo!("shared by multiple variants")
                 };
-                let getter_impl = if field_def.has_getter() {
+                let getter_impl = if field_def.has_getter(false) {
                     quote! {
                         #accessor_vis fn #accessor_ident(self, __repo: &#repo_ty) -> #getter_ret_ty {
                             #getter_expr
@@ -551,18 +551,21 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let mut accessor_definitions = Vec::new();
+    let mut hidden_accessor_definitions = Vec::new();
     for (comp_def_idx, comp_def) in comp_defs.iter().enumerate() {
         assert!(!comp_def.applicable_variants.is_empty());
         for (field_idx, field_def) in comp_def.fields.iter().enumerate() {
-            let accessor_definition = adt::GeneralizedField::build_entity_accessor(
+            let (accessor_definition, hidden_accessor_definition) = adt::GeneralizedField::build_entity_accessor(
                 utils::WithIndex::from_index_and_inner(field_idx, field_def),
                 &option_crate_name,
                 handle_ident.span(),
                 &repo_ty,
+                &handle_ident,
                 &comp_def.component_name.camel_case_ident().into(),
                 comp_def.always_mandatory,
             );
             accessor_definitions.push(accessor_definition);
+            hidden_accessor_definitions.push(hidden_accessor_definition);
         }
     }
 
@@ -590,6 +593,8 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#ttor_definitions)*
             #(#accessor_definitions)*
         }
+
+        #(#hidden_accessor_definitions)*
     };
 
     quote!(
