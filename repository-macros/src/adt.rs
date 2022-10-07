@@ -379,9 +379,19 @@ impl GeneralizedField {
             .collect::<syn::Result<Vec<_>>>()?;
         let hidden_accessor = match &hidden_accessor[..] {
             [] => None,
-            [x] if accessor.is_some() => return Err(syn::Error::new(x.span(), "hidden_accessor cannot be specified together with accessor")),
+            [x] if accessor.is_some() => {
+                return Err(syn::Error::new(
+                    x.span(),
+                    "hidden_accessor cannot be specified together with accessor",
+                ))
+            }
             [x] => Some(x.clone()),
-            [x, y, ..] => return Err(syn::Error::new(y.span(), "multiple hidden_accessor specified")),
+            [x, y, ..] => {
+                return Err(syn::Error::new(
+                    y.span(),
+                    "multiple hidden_accessor specified",
+                ))
+            }
         };
         let field = GeneralizedField {
             field: field.clone(),
@@ -399,7 +409,9 @@ impl GeneralizedField {
 
     pub(crate) fn has_getter(&self, hidden: bool) -> bool {
         match self.flags {
-            GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => self.hidden_accessor.is_some() == hidden,
+            GeneralizedFieldFlags::Getter | GeneralizedFieldFlags::GetterAndSetter => {
+                self.hidden_accessor.is_some() == hidden
+            }
             GeneralizedFieldFlags::None
             | GeneralizedFieldFlags::RefGetter
             | GeneralizedFieldFlags::Setter
@@ -409,7 +421,9 @@ impl GeneralizedField {
 
     pub(crate) fn has_ref_getter(&self, hidden: bool) -> bool {
         match self.flags {
-            GeneralizedFieldFlags::RefGetter | GeneralizedFieldFlags::RefGetterAndSetter => self.hidden_accessor.is_some() == hidden,
+            GeneralizedFieldFlags::RefGetter | GeneralizedFieldFlags::RefGetterAndSetter => {
+                self.hidden_accessor.is_some() == hidden
+            }
             GeneralizedFieldFlags::None
             | GeneralizedFieldFlags::Getter
             | GeneralizedFieldFlags::Setter
@@ -478,57 +492,17 @@ impl GeneralizedField {
         let keyed_inner;
         if let Some(key) = key {
             let default_span = key.span();
+            let ty_typed_value = crate::type_keyed_value(
+                default_span,
+                &key.ident_text(),
+                self.field.ty.clone(),
+                repo_crate_ident,
+            );
+            let trait_into = crate::trait_into_type(default_span, ty_typed_value);
             keyed_inner = syn::Type::ImplTrait(syn::TypeImplTrait {
                 impl_token: Default::default(),
                 bounds: syn::punctuated::Punctuated::from_iter(vec![syn::TypeParamBound::Trait(
-                    syn::TraitBound {
-                        path: syn::Path {
-                            leading_colon: None,
-                            segments: syn::punctuated::Punctuated::from_iter(vec![
-                                syn::PathSegment {
-                                    ident: syn::Ident::new("Into", default_span),
-                                    arguments: syn::PathArguments::AngleBracketed(
-                                        syn::AngleBracketedGenericArguments {
-                                            args: syn::punctuated::Punctuated::from_iter(
-                                                vec![syn::GenericArgument::Type(syn::Type::Path(
-                                                    syn::TypePath {
-                                                        qself: None,
-                                                        path: syn::Path {
-                                                            leading_colon: None,
-                                                            segments: syn::punctuated::Punctuated::from_iter(
-                                                                vec![
-                                                                    syn::PathSegment { ident: repo_crate_ident.clone(), arguments: Default::default() },
-                                                                    syn::PathSegment {  ident: syn::Ident::new("keyed_value", default_span), arguments: Default::default()},
-                                                                    syn::PathSegment {  ident: syn::Ident::new("KeyedValue", default_span), arguments:
-                                                                     syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments { colon2_token: Default::default(), lt_token: Default::default(),
-                                                                        args: syn::punctuated::Punctuated::from_iter(vec![
-                                                                            syn::GenericArgument::Const(syn::Expr::Lit(
-                                                                                ExprLit {
-                                                                                    attrs: Default::default(),
-                                                                                    lit: syn::Lit::Str(syn::LitStr::new(&key.ident_text(), default_span))
-                                                                                }
-                                                                            )),
-                                                                            syn::GenericArgument::Type(self.field.ty.clone())
-                                                                        ]), gt_token: Default::default() })
-                                                                    },
-                                                                ]
-                                                            ),
-                                                        },
-                                                    },
-                                                )),]
-                                            ),
-                                            colon2_token: Default::default(),
-                                            lt_token: Default::default(),
-                                            gt_token: Default::default(),
-                                        },
-                                    ),
-                                },
-                            ]),
-                        },
-                        modifier: syn::TraitBoundModifier::None,
-                        paren_token: Default::default(),
-                        lifetimes: Default::default(),
-                    },
+                    trait_into,
                 )]),
             });
             inner = &keyed_inner;
@@ -550,7 +524,9 @@ impl GeneralizedField {
         let Some(accessor_ident) = this.accessor_ident() else {
             return (TokenStream2::new(), TokenStream2::new());
         };
-        let hidden_accessor_ident = this.hidden_accessor_ident().unwrap_or_else(|| accessor_ident.clone());
+        let hidden_accessor_ident = this
+            .hidden_accessor_ident()
+            .unwrap_or_else(|| accessor_ident.clone());
         let accessor_vis = this.vis();
         let error_ty_component_not_present = syn::Type::Path(syn::TypePath {
             qself: None,
@@ -641,8 +617,12 @@ impl GeneralizedField {
             };
 
             let subaccessor_input = match subaccessor {
-                SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::RefMutGetter |
-                SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter | SubAccessor::HiddenRefMutGetter => None,
+                SubAccessor::Getter
+                | SubAccessor::RefGetter
+                | SubAccessor::RefMutGetter
+                | SubAccessor::HiddenGetter
+                | SubAccessor::HiddenRefGetter
+                | SubAccessor::HiddenRefMutGetter => None,
                 SubAccessor::Setter | SubAccessor::HiddenSetter => Some(this.field.ty.clone()),
             };
 
@@ -652,18 +632,28 @@ impl GeneralizedField {
             };
 
             let subaccessor_repo_input = match subaccessor {
-                SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter => {
+                SubAccessor::Getter
+                | SubAccessor::RefGetter
+                | SubAccessor::HiddenGetter
+                | SubAccessor::HiddenRefGetter => {
                     quote!(#repo_input_ident: &#repo_ty)
                 }
-                SubAccessor::RefMutGetter | SubAccessor::Setter | SubAccessor::HiddenRefMutGetter | SubAccessor::HiddenSetter => {
+                SubAccessor::RefMutGetter
+                | SubAccessor::Setter
+                | SubAccessor::HiddenRefMutGetter
+                | SubAccessor::HiddenSetter => {
                     quote!(#repo_input_ident: &mut #repo_ty)
                 }
             };
 
             let subaccessor_output_ty = match subaccessor {
                 SubAccessor::Getter | SubAccessor::HiddenGetter => this.field.ty.clone(),
-                SubAccessor::RefGetter | SubAccessor::HiddenRefGetter => this.field.ty.clone().wrap_ty_with_shared_ref(),
-                SubAccessor::RefMutGetter | SubAccessor::HiddenRefMutGetter => this.field.ty.clone().wrap_ty_with_unique_ref(),
+                SubAccessor::RefGetter | SubAccessor::HiddenRefGetter => {
+                    this.field.ty.clone().wrap_ty_with_shared_ref()
+                }
+                SubAccessor::RefMutGetter | SubAccessor::HiddenRefMutGetter => {
+                    this.field.ty.clone().wrap_ty_with_unique_ref()
+                }
                 SubAccessor::Setter | SubAccessor::HiddenSetter => crate::type_unit(default_span),
             };
 
@@ -676,25 +666,49 @@ impl GeneralizedField {
             };
 
             let prepare_comp_stmt = match (subaccessor, is_mandatory) {
-                (SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter, true) => {
+                (
+                    SubAccessor::Getter
+                    | SubAccessor::RefGetter
+                    | SubAccessor::HiddenGetter
+                    | SubAccessor::HiddenRefGetter,
+                    true,
+                ) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage(#repo_input_ident);
                         let __comp = __comp_storage.get(#entity_input_ident.entity_id);
                     }
                 }
-                (SubAccessor::Getter | SubAccessor::RefGetter | SubAccessor::HiddenGetter | SubAccessor::HiddenRefGetter, false) => {
+                (
+                    SubAccessor::Getter
+                    | SubAccessor::RefGetter
+                    | SubAccessor::HiddenGetter
+                    | SubAccessor::HiddenRefGetter,
+                    false,
+                ) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage(#repo_input_ident);
                         let __comp = __comp_storage.get(#entity_input_ident.entity_id).ok_or(#error_ty_component_not_present)?;
                     }
                 }
-                (SubAccessor::RefMutGetter | SubAccessor::Setter | SubAccessor::HiddenRefMutGetter | SubAccessor::HiddenSetter, true) => {
+                (
+                    SubAccessor::RefMutGetter
+                    | SubAccessor::Setter
+                    | SubAccessor::HiddenRefMutGetter
+                    | SubAccessor::HiddenSetter,
+                    true,
+                ) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
                         let __comp = __comp_storage.get_mut(#entity_input_ident.entity_id);
                     }
                 }
-                (SubAccessor::RefMutGetter | SubAccessor::Setter | SubAccessor::HiddenRefMutGetter | SubAccessor::HiddenSetter, false) => {
+                (
+                    SubAccessor::RefMutGetter
+                    | SubAccessor::Setter
+                    | SubAccessor::HiddenRefMutGetter
+                    | SubAccessor::HiddenSetter,
+                    false,
+                ) => {
                     quote! {
                         let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
                         let __comp = __comp_storage.get_mut(#entity_input_ident.entity_id).ok_or(#error_ty_component_not_present)?;
@@ -712,7 +726,10 @@ impl GeneralizedField {
                             };
                         }
                     }
-                    SubAccessor::RefGetter | SubAccessor::RefMutGetter |  SubAccessor::HiddenRefGetter | SubAccessor::HiddenRefMutGetter => {
+                    SubAccessor::RefGetter
+                    | SubAccessor::RefMutGetter
+                    | SubAccessor::HiddenRefGetter
+                    | SubAccessor::HiddenRefMutGetter => {
                         quote! {
                             let __value = if #getter_tokens {
                                 value
@@ -741,10 +758,10 @@ impl GeneralizedField {
             };
 
             match subaccessor {
-                SubAccessor::Getter |
-                SubAccessor::RefGetter  |
-                SubAccessor::RefMutGetter |
-                SubAccessor::Setter => {
+                SubAccessor::Getter
+                | SubAccessor::RefGetter
+                | SubAccessor::RefMutGetter
+                | SubAccessor::Setter => {
                     let subaccesor_impl = quote!(
                         #accessor_vis fn #subaccessor_ident(self, #subaccessor_extra_input #subaccessor_repo_input) -> #subaccessor_result_ty {
                             let #entity_input_ident = self;
@@ -754,11 +771,11 @@ impl GeneralizedField {
                         }
                     );
                     result_inherent.extend(subaccesor_impl);
-                },
-                SubAccessor::HiddenGetter |
-                SubAccessor::HiddenRefGetter |
-                SubAccessor::HiddenRefMutGetter |
-                SubAccessor::HiddenSetter => {
+                }
+                SubAccessor::HiddenGetter
+                | SubAccessor::HiddenRefGetter
+                | SubAccessor::HiddenRefMutGetter
+                | SubAccessor::HiddenSetter => {
                     let subaccesor_impl = quote!(
                         fn #subaccessor_ident(#entity_input_ident: #handle_ident, #subaccessor_extra_input #subaccessor_repo_input) -> #subaccessor_result_ty {
                             #prepare_comp_stmt
@@ -767,9 +784,8 @@ impl GeneralizedField {
                         }
                     );
                     result_nonassoc.extend(subaccesor_impl);
-                },
+                }
             }
-            
         }
         (result_inherent, result_nonassoc)
     }
@@ -1014,7 +1030,6 @@ impl AdtVariantDefinition {
                         let _ = __comp_storage.remove(__id).unwrap();
                     }}
                 }
-                
             })
             .collect()
     }

@@ -137,6 +137,71 @@ fn type_unit(span: proc_macro2::Span) -> syn::Type {
     })
 }
 
+fn type_keyed_value(
+    default_span: proc_macro2::Span,
+    key: &str,
+    value_ty: syn::Type,
+    repo_crate_ident: &syn::Ident,
+) -> syn::Type {
+    syn::Type::Path(syn::TypePath {
+        qself: None,
+        path: syn::Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::from_iter(vec![
+                syn::PathSegment {
+                    ident: repo_crate_ident.clone(),
+                    arguments: Default::default(),
+                },
+                syn::PathSegment {
+                    ident: syn::Ident::new("keyed_value", default_span),
+                    arguments: Default::default(),
+                },
+                syn::PathSegment {
+                    ident: syn::Ident::new("KeyedValue", default_span),
+                    arguments: syn::PathArguments::AngleBracketed(
+                        syn::AngleBracketedGenericArguments {
+                            colon2_token: Default::default(),
+                            lt_token: Default::default(),
+                            args: syn::punctuated::Punctuated::from_iter(vec![
+                                syn::GenericArgument::Const(syn::Expr::Lit(syn::ExprLit {
+                                    attrs: Default::default(),
+                                    lit: syn::Lit::Str(syn::LitStr::new(key, default_span)),
+                                })),
+                                syn::GenericArgument::Type(value_ty),
+                            ]),
+                            gt_token: Default::default(),
+                        },
+                    ),
+                },
+            ]),
+        },
+    })
+}
+
+fn trait_into_type(default_span: proc_macro2::Span, ty: syn::Type) -> syn::TraitBound {
+    syn::TraitBound {
+        path: syn::Path {
+            leading_colon: None,
+            segments: syn::punctuated::Punctuated::from_iter(vec![syn::PathSegment {
+                ident: syn::Ident::new("Into", default_span),
+                arguments: syn::PathArguments::AngleBracketed(
+                    syn::AngleBracketedGenericArguments {
+                        args: syn::punctuated::Punctuated::from_iter(vec![
+                            syn::GenericArgument::Type(ty),
+                        ]),
+                        colon2_token: Default::default(),
+                        lt_token: Default::default(),
+                        gt_token: Default::default(),
+                    },
+                ),
+            }]),
+        },
+        modifier: syn::TraitBoundModifier::None,
+        paren_token: Default::default(),
+        lifetimes: Default::default(),
+    }
+}
+
 #[proc_macro_attribute]
 pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as utils::AttributeArgs);
@@ -506,7 +571,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
 
             impl #option_crate_name ::component::ComponentStorage<#repo_ty> for #storage {
                 type Data = #comp_name;
-    
+
                 fn data_by_id(&self, id: #option_crate_name ::id::Id) -> Option<&Self::Data> {
                     self.checked_get(id)
                 }
@@ -555,15 +620,16 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     for (comp_def_idx, comp_def) in comp_defs.iter().enumerate() {
         assert!(!comp_def.applicable_variants.is_empty());
         for (field_idx, field_def) in comp_def.fields.iter().enumerate() {
-            let (accessor_definition, hidden_accessor_definition) = adt::GeneralizedField::build_entity_accessor(
-                utils::WithIndex::from_index_and_inner(field_idx, field_def),
-                &option_crate_name,
-                handle_ident.span(),
-                &repo_ty,
-                &handle_ident,
-                &comp_def.component_name.camel_case_ident().into(),
-                comp_def.always_mandatory,
-            );
+            let (accessor_definition, hidden_accessor_definition) =
+                adt::GeneralizedField::build_entity_accessor(
+                    utils::WithIndex::from_index_and_inner(field_idx, field_def),
+                    &option_crate_name,
+                    handle_ident.span(),
+                    &repo_ty,
+                    &handle_ident,
+                    &comp_def.component_name.camel_case_ident().into(),
+                    comp_def.always_mandatory,
+                );
             accessor_definitions.push(accessor_definition);
             hidden_accessor_definitions.push(hidden_accessor_definition);
         }
