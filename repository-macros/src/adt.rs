@@ -1191,7 +1191,8 @@ impl AdtVariantDefinition {
                 #(#setup_new_components)*
                 #handle_ident {
                     repo_id: <#repo_ty as #repo_crate_ident ::repo::Repo>::repo_id(#repo_input_ident),
-                    entity_id: __id
+                    entity_id: __id,
+                    marker: #repo_crate_ident ::__priv::std::marker::PhantomData,
                 }
             }
         }

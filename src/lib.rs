@@ -5,7 +5,7 @@
 pub mod id {
     use std::num::NonZeroUsize;
 
-    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
     pub struct Id(pub(crate) NonZeroUsize);
 
     impl Id {
@@ -489,6 +489,8 @@ pub mod interned {
 
     pub trait Interned: Any + Sized {
         const SHARING_BETWEEN_REPOS: bool;
+        fn repo_id(&self) -> Id;
+        fn interned_id(&self) -> Id;
     }
 
     pub fn kiosk_sharing_interned_entry<T: Interned>() -> Id {
@@ -516,6 +518,23 @@ pub mod interned {
             })
             .unwrap()
     }
+
+    #[derive(Clone, Copy)]
+    pub struct InternedIdxOf<T: Interned>(pub T);
+
+    impl<T: Interned> PartialEq for InternedIdxOf<T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.repo_id() == other.0.repo_id() && self.0.interned_id() == other.0.interned_id()
+        }
+    }
+    impl<T: Interned> Eq for InternedIdxOf<T> {}
+
+    impl<T: Interned> std::hash::Hash for InternedIdxOf<T> {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.0.repo_id().hash(state);
+            self.0.interned_id().hash(state);
+        }
+    }
 }
 
 pub mod entity {
@@ -529,7 +548,10 @@ pub mod entity {
 
     const ENTITY_KIOSK_SELECTOR: KioskSelector = KioskSelector::Token("entity");
 
-    pub trait Entity: Any + Sized {}
+    pub trait Entity: Any + Sized {
+        fn repo_id(&self) -> Id;
+        fn entity_id(&self) -> Id;
+    }
 
     pub fn kiosk_entity_entry<T: Entity>(repo_id: Id) -> Id {
         KIOSK
@@ -543,6 +565,29 @@ pub mod entity {
             })
             .unwrap()
     }
+
+    #[derive(Clone, Copy)]
+    pub struct EntityIdxOf<T: Entity>(pub T);
+
+    impl<T: Entity> PartialEq for EntityIdxOf<T> {
+        fn eq(&self, other: &Self) -> bool {
+            self.0.repo_id() == other.0.repo_id() && self.0.entity_id() == other.0.entity_id()
+        }
+    }
+    impl<T: Entity> Eq for EntityIdxOf<T> {}
+
+    impl<T: Entity> std::hash::Hash for EntityIdxOf<T> {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.0.repo_id().hash(state);
+            self.0.entity_id().hash(state);
+        }
+    }
+}
+
+#[doc(hidden)]
+pub mod __priv {
+    #[doc(hidden)]
+    pub use std;
 }
 
 pub use crate::repo::Storage;

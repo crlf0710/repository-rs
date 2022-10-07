@@ -406,6 +406,8 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
         #handle_vis struct #handle_ident {
             repo_id: #option_crate_name ::id::Id,
             interned_id: #option_crate_name ::id::Id,
+            marker: #option_crate_name ::__priv::std::marker::PhantomData<
+                #option_crate_name ::__priv::std::rc::Rc<()>>
         }
 
         impl #option_crate_name ::component::ComponentList for #handle_ident {
@@ -419,6 +421,14 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         impl #option_crate_name ::interned::Interned for #handle_ident {
             const SHARING_BETWEEN_REPOS: bool = false;
+
+            fn repo_id(&self) -> #option_crate_name ::id::Id {
+                self.repo_id
+            }
+
+            fn interned_id(&self) -> #option_crate_name ::id::Id {
+                self.interned_id
+            }
         }
 
         impl #handle_ident {
@@ -433,7 +443,8 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let interned_id = component.intern(data);
                 #handle_ident {
                     repo_id,
-                    interned_id
+                    interned_id,
+                    marker: #option_crate_name ::__priv::std::marker::PhantomData,
                 }
             }
 
@@ -640,6 +651,8 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
         #handle_vis struct #handle_ident {
             repo_id: #option_crate_name ::id::Id,
             entity_id: #option_crate_name ::id::Id,
+            marker: #option_crate_name ::__priv::std::marker::PhantomData<
+                #option_crate_name ::__priv::std::rc::Rc<()>>
         }
 
         impl #option_crate_name ::component::ComponentList for #handle_ident {
@@ -652,6 +665,12 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         impl #option_crate_name ::entity::Entity for #handle_ident {
+            fn repo_id(&self) -> #option_crate_name ::id::Id {
+                self.repo_id
+            }
+            fn entity_id(&self) -> #option_crate_name ::id::Id {
+                self.entity_id
+            }
         }
 
         impl #handle_ident {
