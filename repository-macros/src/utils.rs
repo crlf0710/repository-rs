@@ -177,6 +177,31 @@ macro_rules! ident_from_combining {
             $span,
         )
     };
+    ($span:expr => $a:expr, $b:expr, $c:expr, $d:expr) => {
+        syn::Ident::new_raw(
+            &format!(
+                "{}_{}_{}_{}",
+                crate::utils::IdentText::ident_text(&$a),
+                crate::utils::IdentText::ident_text(&$b),
+                crate::utils::IdentText::ident_text(&$c),
+                crate::utils::IdentText::ident_text(&$d)
+            ),
+            $span,
+        )
+    };
+    ($span:expr => $a:expr, $b:expr, $c:expr, $d:expr, $e:expr) => {
+        syn::Ident::new_raw(
+            &format!(
+                "{}_{}_{}_{}_{}",
+                crate::utils::IdentText::ident_text(&$a),
+                crate::utils::IdentText::ident_text(&$b),
+                crate::utils::IdentText::ident_text(&$c),
+                crate::utils::IdentText::ident_text(&$d),
+                crate::utils::IdentText::ident_text(&$e)
+            ),
+            $span,
+        )
+    };
 }
 
 #[derive(Debug)]

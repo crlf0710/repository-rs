@@ -34,4 +34,8 @@ fn test_0002() {
     fruit2.set_length(15, &mut repo).unwrap();
 
     assert!(fruit2.length(&repo).unwrap() < fruit1.radius(&repo).unwrap());
+
+    fruit2.transition_to_apple_from_banana(Color::new_red(&mut repo), 21, &mut repo);
+
+    assert!(fruit2.radius(&repo).unwrap() > fruit1.radius(&repo).unwrap());
 }

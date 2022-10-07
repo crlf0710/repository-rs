@@ -425,6 +425,11 @@ pub mod component_storage {
         }
 
         #[inline]
+        pub fn remove(&mut self, id: Id) -> Option<D> {
+            self.data.remove(&(id.0.get() - 1))
+        }
+
+        #[inline]
         pub fn checked_get(&self, id: Id) -> Option<&D> {
             self.get(id)
         }

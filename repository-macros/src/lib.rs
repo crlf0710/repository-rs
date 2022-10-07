@@ -517,6 +517,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let mut ctor_definitions = Vec::new();
+    let mut ttor_definitions = Vec::new();
 
     for (var_def_idx, var_def) in var_defs.iter().enumerate() {
         let var_def = utils::WithIndex::from_index_and_inner(var_def_idx, var_def);
@@ -530,10 +531,26 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
             &handle_ident,
         );
         ctor_definitions.push(ctor_definition);
+        for (src_var_def_idx, src_var_def) in var_defs.iter().enumerate() {
+            if src_var_def_idx == var_def_idx {
+                continue;
+            }
+            let src_var_def = utils::WithIndex::from_index_and_inner(src_var_def_idx, src_var_def);
+            let ttor_definition = adt::AdtVariantDefinition::build_entity_ttor(
+                var_def,
+                src_var_def,
+                &comp_defs,
+                &option_crate_name,
+                handle_ident.span(),
+                &repo_ty,
+                &handle_vis,
+                &handle_ident,
+            );
+            ttor_definitions.push(ttor_definition);
+        }
     }
 
     let mut accessor_definitions = Vec::new();
-
     for (comp_def_idx, comp_def) in comp_defs.iter().enumerate() {
         assert!(!comp_def.applicable_variants.is_empty());
         for (field_idx, field_def) in comp_def.fields.iter().enumerate() {
@@ -570,6 +587,7 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         impl #handle_ident {
             #(#ctor_definitions)*
+            #(#ttor_definitions)*
             #(#accessor_definitions)*
         }
     };

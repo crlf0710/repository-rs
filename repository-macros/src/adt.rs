@@ -729,10 +729,36 @@ impl AdtVariantDefinition {
         }
     }
 
+    pub(crate) fn default_ttor_fn_name(
+        &self,
+        ttor_prefix: &'static str,
+        ttor_verb1: Option<&'static str>,
+        ttor_verb2: Option<&'static str>,
+        src: &Self,
+        default_span: proc_macro2::Span,
+    ) -> syn::Ident {
+        let dest = self.variant_name.as_ref().unwrap();
+        let src = src.variant_name.as_ref().unwrap();
+        match (ttor_verb1, ttor_verb2) {
+            (None, None) => {
+                ident_from_combining!(dest.span() => ttor_prefix, dest.snake_case, src.snake_case)
+            }
+            (None, Some(v2)) => {
+                ident_from_combining!(dest.span() => ttor_prefix, dest.snake_case, v2, src.snake_case)
+            }
+            (Some(v1), None) => {
+                ident_from_combining!(dest.span() => ttor_prefix, v1, dest.snake_case, src.snake_case)
+            }
+            (Some(v1), Some(v2)) => {
+                ident_from_combining!(dest.span() => ttor_prefix, v1, dest.snake_case, v2, src.snake_case)
+            }
+        }
+    }
+
     pub(crate) fn calc_transition_appending_mandatory_components(
         &self,
         existing: Option<&Self>,
-    ) -> impl Iterator<Item = usize> + '_ {
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
         let mut existing_components = Vec::new();
         if let Some(existing) = existing {
             existing_components.extend(existing.mandatory_components.iter().copied());
@@ -747,7 +773,7 @@ impl AdtVariantDefinition {
     pub(crate) fn calc_transition_appending_optional_components(
         &self,
         existing: Option<&Self>,
-    ) -> impl Iterator<Item = usize> + '_ {
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
         let mut existing_components = Vec::new();
         if let Some(existing) = existing {
             existing_components.extend(existing.mandatory_components.iter().copied());
@@ -762,7 +788,7 @@ impl AdtVariantDefinition {
     pub(crate) fn calc_transition_strengthen_from_optional_to_mandatory_components(
         &self,
         existing: Option<&Self>,
-    ) -> impl Iterator<Item = usize> + '_ {
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
         let mut existing_components = Vec::new();
         if let Some(existing) = existing {
             existing_components.extend(existing.optional_components.iter().copied());
@@ -777,7 +803,7 @@ impl AdtVariantDefinition {
     pub(crate) fn calc_transition_weaken_from_mandatory_to_optional_components(
         &self,
         existing: Option<&Self>,
-    ) -> impl Iterator<Item = usize> + '_ {
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
         let mut existing_components = Vec::new();
         if let Some(existing) = existing {
             existing_components.extend(existing.mandatory_components.iter().copied());
@@ -791,7 +817,7 @@ impl AdtVariantDefinition {
     pub(crate) fn calc_transition_removal_optional_components(
         &self,
         existing: Option<&Self>,
-    ) -> impl Iterator<Item = usize> {
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
         let mut new_components = Vec::new();
         new_components.extend(self.mandatory_components.iter().copied());
         new_components.extend(self.optional_components.iter().copied());
@@ -808,7 +834,7 @@ impl AdtVariantDefinition {
     pub(crate) fn calc_transition_removal_mandatory_components(
         &self,
         existing: Option<&Self>,
-    ) -> impl Iterator<Item = usize> {
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
         let mut new_components = Vec::new();
         new_components.extend(self.mandatory_components.iter().copied());
         new_components.extend(self.optional_components.iter().copied());
@@ -842,6 +868,181 @@ impl AdtVariantDefinition {
         })
     }
 
+    fn prepare_adt_initializer_param_list(
+        this: WithIndex<&Self>,
+        comp_def_idx_and_is_mandatory_list: impl Iterator<Item = (usize, bool)>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        use_keyed: bool,
+        repo_crate_ident: &syn::Ident,
+    ) -> Vec<Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>> {
+        let mut initializer_param_list: Vec<Option<(_, _, _, _)>> = Vec::new();
+        for (comp_def_idx, comp_is_mandatory) in comp_def_idx_and_is_mandatory_list {
+            let comp_def = &comp_defs[comp_def_idx];
+            for (field_idx_in_variant, field_def) in
+                AdtVariantDefinition::iter_owned_fields_with_index_in_components(this, comp_def)
+            {
+                if field_idx_in_variant >= initializer_param_list.len() {
+                    initializer_param_list.resize_with(field_idx_in_variant + 1, Default::default);
+                }
+                assert!(initializer_param_list[field_idx_in_variant].is_none());
+                let variant_ctor_param_ident =
+                    field_def.accessor_or_generative_naming_ident(field_idx_in_variant);
+                let variant_ctor_param_ty =
+                    field_def.ctor_param_ty(comp_is_mandatory, use_keyed, repo_crate_ident);
+
+                let variant_ctor_param_comp_def_idx = comp_def_idx;
+                let variant_ctor_param_comp_field_name = field_def.field.ident.clone();
+                initializer_param_list[field_idx_in_variant] = Some((
+                    variant_ctor_param_ident,
+                    variant_ctor_param_ty,
+                    variant_ctor_param_comp_def_idx,
+                    variant_ctor_param_comp_field_name,
+                ));
+            }
+        }
+        initializer_param_list
+    }
+
+    fn prepare_adt_initializer_tokens(
+        initializer_param_list: impl Iterator<
+            Item = Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>,
+        >,
+        allow_empty_slot: bool,
+    ) -> Vec<TokenStream2> {
+        initializer_param_list
+            .flat_map(|initializer_param: Option<_>| {
+                let Some((param_ident, param_ty, _, _)) = initializer_param.as_ref() else {
+                    if !allow_empty_slot {
+                        unreachable!()
+                    }
+                    return None;
+                };
+                Some(quote!(#param_ident: #param_ty,))
+            })
+            .collect()
+    }
+
+    fn prepare_dispose_comp_statements(
+        comp_list: impl Iterator<Item = (usize, bool)>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        use_keyed: bool,
+        repo_crate_ident: &syn::Ident,
+        repo_input_ident: &syn::Ident,
+        repo_ty: &syn::Path,
+    ) -> Vec<TokenStream2> {
+        comp_list
+            .map(|(comp_def_idx, dont_skip_missing)| {
+                let comp_def = &comp_defs[comp_def_idx];
+                assert!(comp_def.always_mandatory.not());
+                let comp_ty = comp_def.component_name.camel_case_ident();
+                if !dont_skip_missing {
+                    quote! {{
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
+                        __comp_storage.remove(__id);
+                    }}
+                } else {
+                    quote! {{
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
+                        let _ = __comp_storage.remove(__id).unwrap();
+                    }}
+                }
+                
+            })
+            .collect()
+    }
+
+    fn prepare_allocate_id_comp_statements(
+        this: &Self,
+        comp_list: impl Iterator<Item = (usize, bool)>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        initalizer_param_list: &Vec<Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>>,
+        use_keyed: bool,
+        repo_crate_ident: &syn::Ident,
+        repo_input_ident: &syn::Ident,
+        repo_ty: &syn::Path,
+    ) -> Vec<TokenStream2> {
+        comp_list
+            .map(|(comp_def_idx, comp_is_mandatory)| {
+                assert!(comp_is_mandatory);
+                let comp_def = &comp_defs[comp_def_idx];
+                let comp_ty = comp_def.component_name.camel_case_ident();
+                assert!(comp_def.fields_named);
+                let comp_style = AdtVariantCtorStyle::BraceNamed;
+
+                let build_comp_expr = expr_build_adt(
+                    comp_style,
+                    comp_ty.clone().into(),
+                    use_keyed,
+                    !comp_is_mandatory,
+                    initalizer_param_list
+                        .iter()
+                        .flat_map(|param| {
+                            let (param_ident, _, param_comp_idx, param_field_name) =
+                                param.as_ref()?;
+                            if *param_comp_idx != comp_def_idx {
+                                return None;
+                            }
+                            Some((param_field_name.as_ref(), param_ident))
+                        }),
+                );
+
+                assert!(comp_is_mandatory);
+
+                quote! {
+                    __id = {
+                        let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
+                        __comp_storage.allocate_next(#build_comp_expr)
+                    };
+                }
+            })
+            .collect()
+    }
+
+    fn prepare_setup_comp_statements(
+        this: &Self,
+        comp_list: impl Iterator<Item = (usize, bool)>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        initalizer_param_list: &Vec<Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>>,
+        use_keyed: bool,
+        repo_crate_ident: &syn::Ident,
+        repo_input_ident: &syn::Ident,
+        repo_ty: &syn::Path,
+    ) -> Vec<TokenStream2> {
+        comp_list
+            .map(|(comp_def_idx, comp_is_mandatory)| {
+                let comp_def = &comp_defs[comp_def_idx];
+                let comp_ty = comp_def.component_name.camel_case_ident();
+                let comp_style = this.ctor_style;
+
+                let build_comp_expr = expr_build_adt(
+                    comp_style,
+                    comp_ty.clone().into(),
+                    use_keyed,
+                    !comp_is_mandatory,
+                    initalizer_param_list
+                        .iter()
+                        .flat_map(|param| {
+                            let (param_ident, _, param_comp_idx, param_field_name) =
+                                param.as_ref()?;
+                            if *param_comp_idx != comp_def_idx {
+                                return None;
+                            }
+                            Some((param_field_name.as_ref(), param_ident))
+                        }),
+                );
+
+                if !comp_is_mandatory {
+                    todo!(); // FIXME
+                }
+
+                quote! {{
+                    let __comp_storage = <#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident);
+                    __comp_storage.append(__id, #build_comp_expr);
+                }}
+            })
+            .collect()
+    }
+
     pub(crate) fn build_entity_ctor(
         this: WithIndex<&Self>,
         comp_defs: &Vec<AdtComponentDefinition>,
@@ -852,130 +1053,148 @@ impl AdtVariantDefinition {
         handle_ident: &syn::Ident,
     ) -> proc_macro2::TokenStream {
         let ctor_ident = this.default_ctor_fn_name("new", default_span);
+        let use_keyed = false;
 
         let mandatory_list = this.calc_transition_appending_mandatory_components(None);
         let optional_list = this.calc_transition_appending_optional_components(None);
 
-        let chained_list = mandatory_list
+        let setup_comp_list = mandatory_list
             .map(|x| (x, true))
-            .chain(optional_list.map(|x| (x, false)))
-            .collect::<Vec<_>>();
+            .chain(optional_list.map(|x| (x, false)));
 
+        let mut variant_ctor_param_list = Self::prepare_adt_initializer_param_list(
+            this,
+            setup_comp_list.clone(),
+            comp_defs,
+            use_keyed,
+            repo_crate_ident,
+        );
+
+        let repo_input_ident = syn::Ident::new("repo", handle_ident.span());
+
+        let alloc_id_components: Vec<TokenStream2> = Self::prepare_allocate_id_comp_statements(
+            &this,
+            setup_comp_list
+                .clone()
+                .filter(|(comp_def_idx, comp_is_mandatory)| comp_defs[*comp_def_idx].is_inherent),
+            comp_defs,
+            &variant_ctor_param_list,
+            use_keyed,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+
+        let setup_new_components: Vec<TokenStream2> = Self::prepare_setup_comp_statements(
+            &this,
+            setup_comp_list
+                .filter(|(comp_def_idx, comp_is_mandatory)| !comp_defs[*comp_def_idx].is_inherent),
+            comp_defs,
+            &variant_ctor_param_list,
+            use_keyed,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+
+        let ctor_args =
+            Self::prepare_adt_initializer_tokens(variant_ctor_param_list.into_iter(), false);
+
+        quote! {
+            #[allow(non_snake_case)]
+            #handle_vis fn #ctor_ident(#(#ctor_args)* #repo_input_ident: &mut #repo_ty, ) -> Self {
+                let __id;
+                #(#alloc_id_components)*
+                #(#setup_new_components)*
+                #handle_ident {
+                    repo_id: <#repo_ty as #repo_crate_ident ::repo::Repo>::repo_id(#repo_input_ident),
+                    entity_id: __id
+                }
+            }
+        }
+    }
+
+    pub(crate) fn build_entity_ttor(
+        this: WithIndex<&Self>,
+        src_var_def: WithIndex<&Self>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        repo_crate_ident: &syn::Ident,
+        default_span: proc_macro2::Span,
+        repo_ty: &syn::Path,
+        handle_vis: &syn::Visibility,
+        handle_ident: &syn::Ident,
+    ) -> proc_macro2::TokenStream {
+        let ttor_ident = this.default_ttor_fn_name(
+            "transition",
+            Some("to"),
+            Some("from"),
+            &src_var_def,
+            default_span,
+        );
         let use_keyed = false;
 
-        let mut variant_ctor_param_list: Vec<
-            Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>,
-        > = Vec::new();
-        for (comp_def_idx, comp_is_mandatory) in chained_list.iter().copied() {
-            let comp_def = &comp_defs[comp_def_idx];
-            for (field_idx_in_variant, field_def) in
-                AdtVariantDefinition::iter_owned_fields_with_index_in_components(this, comp_def)
-            {
-                if field_idx_in_variant >= variant_ctor_param_list.len() {
-                    variant_ctor_param_list.resize_with(field_idx_in_variant + 1, Default::default);
-                }
-                assert!(variant_ctor_param_list[field_idx_in_variant].is_none());
-                let variant_ctor_param_ident =
-                    field_def.accessor_or_generative_naming_ident(field_idx_in_variant);
-                let variant_ctor_param_ty =
-                    field_def.ctor_param_ty(comp_is_mandatory, use_keyed, repo_crate_ident);
+        let mandatory_list =
+            this.calc_transition_appending_mandatory_components(Some(&src_var_def));
+        let mandatory_list_override = this
+            .calc_transition_strengthen_from_optional_to_mandatory_components(Some(&src_var_def));
+        let optional_list = this.calc_transition_appending_optional_components(Some(&src_var_def));
+        let removal_list = this.calc_transition_removal_mandatory_components(Some(&src_var_def));
+        let removal_list_skipmissing =
+            this.calc_transition_removal_optional_components(Some(&src_var_def));
 
-                let variant_ctor_param_comp_def_idx = comp_def_idx;
-                let variant_ctor_param_comp_field_name = field_def.field.ident.clone();
-                variant_ctor_param_list[field_idx_in_variant] = Some((
-                    variant_ctor_param_ident,
-                    variant_ctor_param_ty,
-                    variant_ctor_param_comp_def_idx,
-                    variant_ctor_param_comp_field_name,
-                ));
+        let repo_input_ident = syn::Ident::new("repo", handle_ident.span());
+
+        let dispose_comp_list = removal_list
+            .map(|x| (x, true))
+            .chain(removal_list_skipmissing.map(|x| (x, false)))
+            .chain(mandatory_list_override.clone().map(|x| (x, false)));
+
+        let setup_comp_list = mandatory_list
+            .map(|x| (x, true))
+            .chain(mandatory_list_override.map(|x| (x, true)))
+            .chain(optional_list.map(|x| (x, false)));
+
+        let mut variant_ttor_param_list = Self::prepare_adt_initializer_param_list(
+            this,
+            setup_comp_list.clone(),
+            comp_defs,
+            use_keyed,
+            repo_crate_ident,
+        );
+
+        let dispose_old_components: Vec<TokenStream2> = Self::prepare_dispose_comp_statements(
+            dispose_comp_list,
+            comp_defs,
+            use_keyed,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+        let setup_new_components: Vec<TokenStream2> = Self::prepare_setup_comp_statements(
+            &this,
+            setup_comp_list,
+            comp_defs,
+            &variant_ttor_param_list,
+            use_keyed,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+
+        let ttor_args =
+            Self::prepare_adt_initializer_tokens(variant_ttor_param_list.into_iter(), true);
+
+        quote!(
+            #[allow(non_snake_case)]
+            #handle_vis fn #ttor_ident(self, #(#ttor_args)* #repo_input_ident: &mut #repo_ty) {
+                let __repo_id = self.repo_id;
+                let __id = self.entity_id;
+                assert_eq!(__repo_id, <#repo_ty as #repo_crate_ident ::repo::Repo>::repo_id(#repo_input_ident));
+                // FIXME: could check discriminant here.
+                #(#dispose_old_components)*
+                #(#setup_new_components)*
             }
-        }
-        let mut variant_ctor_build_comp_expr_list: Vec<(proc_macro2::TokenStream, bool)> =
-            Vec::new();
-        for (comp_def_idx, comp_is_mandatory) in chained_list {
-            let comp_def = &comp_defs[comp_def_idx];
-            let comp_name = comp_def.component_name.camel_case_ident();
-            let comp_def_index = syn::Index::from(comp_def_idx);
-            let comp_style = if comp_def.is_inherent {
-                AdtVariantCtorStyle::BraceNamed
-            } else {
-                this.ctor_style
-            };
-
-            let build_comp_expr = expr_build_adt(
-                comp_style,
-                comp_name.into(),
-                use_keyed,
-                !comp_is_mandatory,
-                variant_ctor_param_list
-                    .iter()
-                    .flat_map(|variant_ctor_param| {
-                        let (param_ident, _, param_comp_idx, param_field_name) =
-                            variant_ctor_param.as_ref()?;
-                        if *param_comp_idx != comp_def_idx {
-                            return None;
-                        }
-                        Some((param_field_name.as_ref(), param_ident))
-                    }),
-            );
-
-            // FIXME: tidy up the following
-            {
-                let ctor_comp_expr = if comp_def.is_inherent {
-                    assert!(comp_is_mandatory);
-                    assert!(comp_def.fields_named);
-                    quote! {
-                        let __id;
-                        {
-                            __id = __comp_list.#comp_def_index.allocate_next(#build_comp_expr);
-                        }
-                    }
-                } else {
-                    if comp_is_mandatory {
-                        quote! {{
-                            __comp_list.#comp_def_index.append(__id, #build_comp_expr);
-                        }}
-                    } else {
-                        quote! {{
-                            todo!();   // FIXME
-                        }}
-                    }
-                };
-                variant_ctor_build_comp_expr_list.push((ctor_comp_expr, comp_is_mandatory));
-            }
-        }
-
-        // FIXME: tidy up the following
-        {
-            let ctor_style = this.ctor_style;
-            let ctor_path = &this.ctor_path;
-            let ctor_args = if !use_keyed {
-                variant_ctor_param_list
-                    .iter()
-                    .map(|ctor_param| {
-                        let (ctor_param_ident, ctor_param_ty, _, _) = ctor_param.as_ref().unwrap();
-                        quote!(#ctor_param_ident: #ctor_param_ty,)
-                    })
-                    .collect::<Vec<_>>()
-            } else {
-                unimplemented!() // FIXME
-            };
-            let variant_ctor_build_comp_expr_list =
-                variant_ctor_build_comp_expr_list.into_iter().map(|x| x.0);
-            quote! {
-                #[allow(non_snake_case)]
-                #handle_vis fn #ctor_ident(#(#ctor_args)* __repo: &mut #repo_ty, ) -> Self {
-                    use #repo_crate_ident ::repo::Repo;
-                    let __comp_list = <#repo_ty as #repo_crate_ident ::component::HasComponentList<#handle_ident>>::component_list_mut(__repo);
-                    #(#variant_ctor_build_comp_expr_list)*
-                    let repo_id = __repo.repo_id();
-                    #handle_ident {
-                        repo_id,
-                        entity_id: __id
-                    }
-                }
-            }
-        }
+        )
     }
 }
 
