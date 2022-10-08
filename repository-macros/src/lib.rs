@@ -13,8 +13,7 @@ mod utils;
 
 mod adt;
 
-#[proc_macro_attribute]
-pub fn repo(attr: TokenStream, item: TokenStream) -> TokenStream {
+fn repo_macro_impl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as utils::AttributeArgs);
     let option_storage_field = unwrap_result_in_macro!(args.get_ident_with_name("storage_field"));
     let mut item = parse_macro_input!(item as adt::ItemStructOnly);
@@ -202,8 +201,7 @@ fn trait_into_type(default_span: proc_macro2::Span, ty: syn::Type) -> syn::Trait
     }
 }
 
-#[proc_macro_attribute]
-pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
+fn interned_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> TokenStream {
     let args = parse_macro_input!(attr as utils::AttributeArgs);
     // let option_shared = utils::has_str_meta_in_args(&args, "shared");   // FIXME: NOT SUPPORTED YET
     let option_data = unwrap_result_in_macro!(args.get_ident_with_name("data"));
@@ -281,7 +279,6 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
                         Some((ctor_param_ident, ctor_param_ty, ctor_param_field_name));
                 }
             }
-            let use_keyed = false;
             let ctor_style = var_def.ctor_style;
             let ctor_path = &var_def.ctor_path;
             let ctor_args = if !use_keyed {
@@ -496,8 +493,7 @@ pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-#[proc_macro_attribute]
-pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
+fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> TokenStream {
     let args = parse_macro_input!(attr as utils::AttributeArgs);
     let option_inherent = unwrap_result_in_macro!(args.get_ident_with_name("inherent"));
     let option_repo_ty = unwrap_result_in_macro!(args.get_path_with_name("repo"));
@@ -689,45 +685,89 @@ pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
     .into()
 }
 
-struct KeyedValue {
-    key: syn::Ident,
-    colon: syn::Token![:],
-    value: syn::Expr,
+fn keyed_macro_impl(input: TokenStream, non_fallback: bool) -> TokenStream {
+    struct KeyedValue {
+        key: syn::Ident,
+        colon: syn::Token![:],
+        value: syn::Expr,
+    }
+
+    impl syn::parse::Parse for KeyedValue {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            let key: syn::Ident = input.parse()?;
+            if input.is_empty() {
+                return Ok(KeyedValue {
+                    key: key.clone(),
+                    colon: Default::default(),
+                    value: syn::Expr::Path(syn::ExprPath {
+                        attrs: Default::default(),
+                        qself: Default::default(),
+                        path: key.into(),
+                    }),
+                });
+            }
+            Ok(KeyedValue {
+                key,
+                colon: input.parse()?,
+                value: input.parse()?,
+            })
+        }
+    }
+
+    let keyed_value = parse_macro_input!(input as KeyedValue);
+    if non_fallback {
+        let key_str = syn::Lit::Str(syn::LitStr::new(
+            &keyed_value.key.ident_text(),
+            keyed_value.key.span(),
+        ));
+        let value_expr = keyed_value.value;
+
+        let option_crate_name = ident_crate_repo(proc_macro2::Span::call_site());
+
+        quote! {
+            #option_crate_name ::keyed_value::KeyedValue::<#key_str, _>::new(#value_expr)
+        }
+        .into()
+    } else {
+        let value = keyed_value.value;
+        quote! {
+            (#value)
+        }
+        .into()
+    }
 }
 
-impl syn::parse::Parse for KeyedValue {
-    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
-        Ok(KeyedValue {
-            key: input.parse()?,
-            colon: input.parse()?,
-            value: input.parse()?,
-        })
-    }
+#[proc_macro_attribute]
+pub fn repo(attr: TokenStream, item: TokenStream) -> TokenStream {
+    repo_macro_impl(attr, item)
+}
+
+#[proc_macro_attribute]
+pub fn interned(attr: TokenStream, item: TokenStream) -> TokenStream {
+    interned_macro_impl(attr, item, true)
+}
+
+#[proc_macro_attribute]
+pub fn interned_without_keyed(attr: TokenStream, item: TokenStream) -> TokenStream {
+    interned_macro_impl(attr, item, false)
+}
+
+#[proc_macro_attribute]
+pub fn entity(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entity_macro_impl(attr, item, true)
+}
+
+#[proc_macro_attribute]
+pub fn entity_without_keyed(attr: TokenStream, item: TokenStream) -> TokenStream {
+    entity_macro_impl(attr, item, false)
 }
 
 #[proc_macro]
 pub fn keyed(input: TokenStream) -> TokenStream {
-    let keyed_value = parse_macro_input!(input as KeyedValue);
-    let key_str = syn::Lit::Str(syn::LitStr::new(
-        &keyed_value.key.ident_text(),
-        keyed_value.key.span(),
-    ));
-    let value_expr = keyed_value.value;
-
-    let option_crate_name = ident_crate_repo(proc_macro2::Span::call_site());
-
-    quote! {
-        #option_crate_name ::keyed_value::KeyedValue::<#key_str, _>::new(#value_expr)
-    }
-    .into()
+    keyed_macro_impl(input, true)
 }
 
 #[proc_macro]
 pub fn keyed_fallback(input: TokenStream) -> TokenStream {
-    let keyed_value = parse_macro_input!(input as KeyedValue);
-    let value = keyed_value.value;
-    quote! {
-        (#value)
-    }
-    .into()
+    keyed_macro_impl(input, false)
 }

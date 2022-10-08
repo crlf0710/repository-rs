@@ -5,8 +5,7 @@ struct Repo;
 
 use repo::keyed as k;
 
-#[cfg_attr(feature = "keyed", repo::interned(data = NameData, keyed = true))]
-#[cfg_attr(not(feature = "keyed"), repo::interned(data = NameData))]
+#[repo::interned(data = NameData)]
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Name(#[accessor = name] &'static str);
 

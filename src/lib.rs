@@ -591,8 +591,14 @@ pub mod __priv {
 }
 
 pub use crate::repo::Storage;
+#[cfg(feature = "keyed")]
 pub use repository_macros::entity;
+#[cfg(not(feature = "keyed"))]
+pub use repository_macros::entity_without_keyed as entity;
+#[cfg(feature = "keyed")]
 pub use repository_macros::interned;
+#[cfg(not(feature = "keyed"))]
+pub use repository_macros::interned_without_keyed as interned;
 #[cfg(feature = "keyed")]
 pub use repository_macros::keyed;
 #[cfg(not(feature = "keyed"))]
