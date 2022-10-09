@@ -589,20 +589,52 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
     }
 
     let mut ctor_definitions = Vec::new();
+    let mut stor_definitions = Vec::new();
     let mut ttor_definitions = Vec::new();
 
+    let is_singleton = var_defs
+        .iter()
+        .any(|var_def| var_def.singleton_init_args.is_some());
     for (var_def_idx, var_def) in var_defs.iter().enumerate() {
         let var_def = utils::WithIndex::from_index_and_inner(var_def_idx, var_def);
-        let ctor_definition = adt::AdtVariantDefinition::build_entity_ctor(
-            var_def,
-            &comp_defs,
-            &option_crate_name,
-            handle_ident.span(),
-            &repo_ty,
-            &handle_vis,
-            &handle_ident,
-        );
-        ctor_definitions.push(ctor_definition);
+        if !is_singleton {
+            let ctor_definition = adt::AdtVariantDefinition::build_entity_ctor(
+                var_def,
+                &comp_defs,
+                use_keyed,
+                &option_crate_name,
+                handle_ident.span(),
+                &repo_ty,
+                &handle_vis,
+                &handle_ident,
+            );
+            ctor_definitions.push(ctor_definition);
+        } else if let Some(stor_args) = var_def.singleton_init_args.as_ref() {
+            let stor_args_values = match stor_args {
+                proc_macro2::TokenTree::Group(g) => {
+                    if matches!(g.delimiter(), proc_macro2::Delimiter::Parenthesis) {
+                        Some(g.stream())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            let stor_args_values = unwrap_result_in_macro!(stor_args_values
+                .ok_or_else(|| syn::Error::new(stor_args.span(), "Invalid singleton initializer")));
+            let stor_definition = adt::AdtVariantDefinition::build_entity_stor(
+                var_def,
+                stor_args_values,
+                &comp_defs,
+                use_keyed,
+                &option_crate_name,
+                handle_ident.span(),
+                &repo_ty,
+                &handle_vis,
+                &handle_ident,
+            );
+            stor_definitions.push(stor_definition);
+        }
         for (src_var_def_idx, src_var_def) in var_defs.iter().enumerate() {
             if src_var_def_idx == var_def_idx {
                 continue;
@@ -612,6 +644,7 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
                 var_def,
                 src_var_def,
                 &comp_defs,
+                use_keyed,
                 &option_crate_name,
                 handle_ident.span(),
                 &repo_ty,
@@ -671,6 +704,7 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
 
         impl #handle_ident {
             #(#ctor_definitions)*
+            #(#stor_definitions)*
             #(#ttor_definitions)*
             #(#accessor_definitions)*
         }

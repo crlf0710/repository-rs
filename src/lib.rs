@@ -301,6 +301,15 @@ pub mod component_storage {
         pub fn checked_get(&self, id: Id) -> Option<&D> {
             self.data.get_index(id.0.get() - 1)
         }
+
+        #[inline]
+        pub fn first_id(&self) -> Option<Id> {
+            if self.data.is_empty() {
+                None
+            } else {
+                Some(Id::ONE)
+            }
+        }
     }
 
     pub struct DenseUniqStorageWithId<D> {
@@ -326,6 +335,11 @@ pub mod component_storage {
             } else {
                 self.allocate_next(d)
             }
+        }
+
+        #[inline]
+        pub fn first_id(&self) -> Option<Id> {
+            self.inner.first_id()
         }
 
         #[inline]
@@ -391,6 +405,15 @@ pub mod component_storage {
         pub fn checked_get(&self, id: Id) -> Option<&D> {
             self.data.get((id.0.get() - 1))
         }
+
+        #[inline]
+        pub fn first_id(&self) -> Option<Id> {
+            if self.data.is_empty() {
+                None
+            } else {
+                Some(Id::ONE)
+            }
+        }
     }
 
     pub struct SparseStorage<D> {
@@ -446,6 +469,11 @@ pub mod component_storage {
                 kiosk_entry,
                 inner: DenseStorage::new(),
             }
+        }
+
+        #[inline]
+        pub fn first_id(&self) -> Option<Id> {
+            self.inner.first_id()
         }
 
         #[inline]

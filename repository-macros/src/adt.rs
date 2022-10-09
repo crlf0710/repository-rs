@@ -249,6 +249,41 @@ impl GeneralizedVariantMut<'_> {
             AdtVariantCtorStyle::BraceNamed
         }
     }
+
+    pub(crate) fn take_entity_singleton_init_args(
+        &mut self,
+    ) -> syn::Result<Option<proc_macro2::TokenTree>> {
+        let attr_list;
+        if !matches!(self.kind, GeneralizedVariantKind::EnumVariant) {
+            attr_list = &mut *self.outer_attributes;
+        } else {
+            attr_list = match &mut self.inner_attributes {
+                Some(attrs) => attrs,
+                None => return Ok(None),
+            };
+        }
+        let singleton_init_args =
+            attrs_take_with_ident_name(attr_list, "singleton_init").collect::<Vec<_>>();
+        let singleton_init_args = match &singleton_init_args[..] {
+            [] => None,
+            [x] => {
+                let attr = x.clone();
+                let tokens = attr.tokens.into_iter().collect::<Vec<_>>();
+                match &tokens[..] {
+                    [] => Some(proc_macro2::TokenTree::Group(proc_macro2::Group::new(proc_macro2::Delimiter::Parenthesis, Default::default()))),
+                    [x @ proc_macro2::TokenTree::Group(_) ] => Some(x.clone()),
+                    _ => return Err(syn::Error::new(attr.path.span(), "singleton_init_args not specified as parenthesis delimited expression list")),
+                }
+            }
+            [x, y, ..] => {
+                return Err(syn::Error::new(
+                    y.span(),
+                    "multiple singleton_init_args specified",
+                ))
+            }
+        };
+        Ok(singleton_init_args)
+    }
 }
 
 pub(crate) struct GeneralizedVariantIterMut<'a> {
@@ -796,6 +831,7 @@ pub(crate) struct AdtVariantDefinition {
     pub(crate) variant_name: Option<utils::IdentPair>,
     pub(crate) ctor_path: syn::Path,
     pub(crate) ctor_style: AdtVariantCtorStyle,
+    pub(crate) singleton_init_args: Option<proc_macro2::TokenTree>,
     pub(crate) mandatory_components: Vec<usize>,
     pub(crate) optional_components: Vec<usize>,
 }
@@ -992,6 +1028,7 @@ impl AdtVariantDefinition {
             Item = Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>,
         >,
         allow_empty_slot: bool,
+        template: impl Fn(&syn::Ident, &syn::Type) -> TokenStream2,
     ) -> Vec<TokenStream2> {
         initializer_param_list
             .flat_map(|initializer_param: Option<_>| {
@@ -1001,7 +1038,7 @@ impl AdtVariantDefinition {
                     }
                     return None;
                 };
-                Some(quote!(#param_ident: #param_ty,))
+                Some(template(param_ident, param_ty))
             })
             .collect()
     }
@@ -1032,6 +1069,25 @@ impl AdtVariantDefinition {
                 }
             })
             .collect()
+    }
+
+    fn prepare_allocate_id_storage(
+        this: &Self,
+        comp_list: impl Iterator<Item = (usize, bool)>,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        repo_crate_ident: &syn::Ident,
+        repo_input_ident: &syn::Ident,
+        repo_ty: &syn::Path,
+    ) -> TokenStream2 {
+        let mut comp_list = comp_list.collect::<Vec<_>>();
+        assert!(comp_list.len() == 1);
+        let (comp_def_idx, comp_is_mandatory) = comp_list.pop().unwrap();
+        assert!(comp_is_mandatory);
+        let comp_def = &comp_defs[comp_def_idx];
+        let comp_ty = comp_def.component_name.camel_case_ident();
+        assert!(comp_def.fields_named);
+
+        quote!(<#repo_ty as #repo_crate_ident ::component::HasComponent<#comp_ty>>::component_storage_mut(#repo_input_ident))
     }
 
     fn prepare_allocate_id_comp_statements(
@@ -1129,6 +1185,7 @@ impl AdtVariantDefinition {
     pub(crate) fn build_entity_ctor(
         this: WithIndex<&Self>,
         comp_defs: &Vec<AdtComponentDefinition>,
+        use_keyed: bool,
         repo_crate_ident: &syn::Ident,
         default_span: proc_macro2::Span,
         repo_ty: &syn::Path,
@@ -1136,7 +1193,6 @@ impl AdtVariantDefinition {
         handle_ident: &syn::Ident,
     ) -> proc_macro2::TokenStream {
         let ctor_ident = this.default_ctor_fn_name("new", default_span);
-        let use_keyed = false;
 
         let mandatory_list = this.calc_transition_appending_mandatory_components(None);
         let optional_list = this.calc_transition_appending_optional_components(None);
@@ -1180,8 +1236,11 @@ impl AdtVariantDefinition {
             repo_ty,
         );
 
-        let ctor_args =
-            Self::prepare_adt_initializer_tokens(variant_ctor_param_list.into_iter(), false);
+        let ctor_args = Self::prepare_adt_initializer_tokens(
+            variant_ctor_param_list.into_iter(),
+            false,
+            |param_ident, param_type| quote!(#param_ident: #param_type,),
+        );
 
         quote! {
             #[allow(non_snake_case)]
@@ -1198,10 +1257,164 @@ impl AdtVariantDefinition {
         }
     }
 
+    pub(crate) fn build_entity_stor(
+        this: WithIndex<&Self>,
+        stor_args_values: proc_macro2::TokenStream,
+        comp_defs: &Vec<AdtComponentDefinition>,
+        use_keyed: bool,
+        repo_crate_ident: &syn::Ident,
+        default_span: proc_macro2::Span,
+        repo_ty: &syn::Path,
+        handle_vis: &syn::Visibility,
+        handle_ident: &syn::Ident,
+    ) -> proc_macro2::TokenStream {
+        let stor_ident = syn::Ident::new_raw("singleton", default_span);
+        fn replace_dollar_repo_in_tt(
+            input: &proc_macro2::TokenTree,
+            replacement: &proc_macro2::TokenTree,
+        ) -> proc_macro2::TokenTree {
+            match input {
+                proc_macro2::TokenTree::Group(g) => {
+                    proc_macro2::TokenTree::Group(proc_macro2::Group::new(
+                        g.delimiter(),
+                        replace_dollar_repo_in_ts(g.stream(), replacement).collect(),
+                    ))
+                }
+                proc_macro2::TokenTree::Ident(i) => proc_macro2::TokenTree::Ident(i.clone()),
+                proc_macro2::TokenTree::Punct(p) => proc_macro2::TokenTree::Punct(p.clone()),
+                proc_macro2::TokenTree::Literal(l) => proc_macro2::TokenTree::Literal(l.clone()),
+            }
+        }
+        fn replace_dollar_repo_in_ts(
+            input: proc_macro2::TokenStream,
+            replacement: &proc_macro2::TokenTree,
+        ) -> impl Iterator<Item = proc_macro2::TokenTree> {
+            let mut result = Vec::new();
+            let mut input = input.into_iter().peekable();
+            while let Some(tt) = input.next() {
+                if let proc_macro2::TokenTree::Punct(p) = &tt {
+                    if p.as_char() == '$' {
+                        if let Some(proc_macro2::TokenTree::Ident(i)) = input.peek() {
+                            if i.ident_text() == "repo" {
+                                let _ = input.next();
+                                result.extend(Some(replacement.clone()));
+                                continue;
+                            }
+                        }
+                    }
+                }
+                result.extend(Some(replace_dollar_repo_in_tt(&tt, replacement)));
+            }
+            result.into_iter()
+        }
+
+        let repo_input_ident = syn::Ident::new("repo", handle_ident.span());
+
+        let mut stor_args_values =
+            replace_dollar_repo_in_ts(stor_args_values, &repo_input_ident.clone().into())
+                .collect::<Vec<_>>();
+        if !stor_args_values
+            .last()
+            .map(|x| {
+                if let proc_macro2::TokenTree::Punct(p) = x {
+                    p.as_char() == ','
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+        {
+            stor_args_values.extend(quote!(,));
+        }
+
+        let mandatory_list = this.calc_transition_appending_mandatory_components(None);
+        let optional_list = this.calc_transition_appending_optional_components(None);
+
+        let setup_comp_list = mandatory_list
+            .map(|x| (x, true))
+            .chain(optional_list.map(|x| (x, false)));
+
+        let mut variant_stor_param_list = Self::prepare_adt_initializer_param_list(
+            this,
+            setup_comp_list.clone(),
+            comp_defs,
+            use_keyed,
+            repo_crate_ident,
+        );
+
+        let repo_input_ident = syn::Ident::new("repo", handle_ident.span());
+
+        let alloc_id_storage = Self::prepare_allocate_id_storage(
+            &this,
+            setup_comp_list
+                .clone()
+                .filter(|(comp_def_idx, comp_is_mandatory)| comp_defs[*comp_def_idx].is_inherent),
+            comp_defs,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+
+        let alloc_id_components: Vec<TokenStream2> = Self::prepare_allocate_id_comp_statements(
+            &this,
+            setup_comp_list
+                .clone()
+                .filter(|(comp_def_idx, comp_is_mandatory)| comp_defs[*comp_def_idx].is_inherent),
+            comp_defs,
+            &variant_stor_param_list,
+            use_keyed,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+
+        let setup_new_components: Vec<TokenStream2> = Self::prepare_setup_comp_statements(
+            &this,
+            setup_comp_list
+                .filter(|(comp_def_idx, comp_is_mandatory)| !comp_defs[*comp_def_idx].is_inherent),
+            comp_defs,
+            &variant_stor_param_list,
+            use_keyed,
+            repo_crate_ident,
+            &repo_input_ident,
+            repo_ty,
+        );
+
+        let stor_args_names = Self::prepare_adt_initializer_tokens(
+            variant_stor_param_list.iter().cloned(),
+            false,
+            |param_ident, _| quote!(#param_ident,),
+        );
+        let stor_args_tys = Self::prepare_adt_initializer_tokens(
+            variant_stor_param_list.into_iter(),
+            false,
+            |_, param_type| quote!(#param_type,),
+        );
+        quote! {
+            #[allow(non_snake_case)]
+            #handle_vis fn #stor_ident(#repo_input_ident: &mut #repo_ty, ) -> Self {
+                let __id;
+                if let Some(id) = (#alloc_id_storage).first_id() {
+                    __id = id;
+                } else {
+                    let (#(#stor_args_names)*) : (#(#stor_args_tys)*) = (#(#stor_args_values)*);
+                    #(#alloc_id_components)*
+                    #(#setup_new_components)*
+                }
+                #handle_ident {
+                    repo_id: <#repo_ty as #repo_crate_ident ::repo::Repo>::repo_id(#repo_input_ident),
+                    entity_id: __id,
+                    marker: #repo_crate_ident ::__priv::std::marker::PhantomData,
+                }
+            }
+        }
+    }
+
     pub(crate) fn build_entity_ttor(
         this: WithIndex<&Self>,
         src_var_def: WithIndex<&Self>,
         comp_defs: &Vec<AdtComponentDefinition>,
+        use_keyed: bool,
         repo_crate_ident: &syn::Ident,
         default_span: proc_macro2::Span,
         repo_ty: &syn::Path,
@@ -1215,7 +1428,6 @@ impl AdtVariantDefinition {
             &src_var_def,
             default_span,
         );
-        let use_keyed = false;
 
         let mandatory_list =
             this.calc_transition_appending_mandatory_components(Some(&src_var_def));
@@ -1265,8 +1477,11 @@ impl AdtVariantDefinition {
             repo_ty,
         );
 
-        let ttor_args =
-            Self::prepare_adt_initializer_tokens(variant_ttor_param_list.into_iter(), true);
+        let ttor_args = Self::prepare_adt_initializer_tokens(
+            variant_ttor_param_list.into_iter(),
+            true,
+            |param_ident, param_type| quote!(#param_ident: #param_type,),
+        );
 
         quote!(
             #[allow(non_snake_case)]
@@ -1467,12 +1682,18 @@ pub(crate) fn collect_adt_variants_and_components(
         let variant_name = variant.variant_name();
         let variant_ctor_path = variant.variant_ctor_path();
         let variant_ctor_style = variant.variant_ctor_style();
+        let variant_singleton_init_args = if matches!(adt_kind, AdtKind::Entity) {
+            variant.take_entity_singleton_init_args()?
+        } else {
+            None
+        };
 
         let (variant_def_idx, variant_def) =
             variant_defs.push_and_get_with_index(AdtVariantDefinition {
                 variant_name,
                 ctor_path: variant_ctor_path,
                 ctor_style: variant_ctor_style,
+                singleton_init_args: variant_singleton_init_args,
                 mandatory_components: Vec::new(),
                 optional_components: Vec::new(),
             });
