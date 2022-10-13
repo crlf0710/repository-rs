@@ -138,12 +138,20 @@ mod kiosk {
 
 #[cfg(feature = "keyed")]
 pub mod keyed_value {
-    pub struct KeyedValue<const KEY: &'static str, T>(pub T);
-    impl<const KEY: &'static str, T> From<T> for KeyedValue<KEY, T> {
-        fn from(v: T) -> Self {
-            KeyedValue(v)
+    pub trait ToKeyedValue<const KEY: &'static str, T> {
+        fn to_keyed_value(self) -> KeyedValue<KEY, T>;
+    }
+
+    impl<const KEY: &'static str, U, T> ToKeyedValue<KEY, U> for T
+    where
+        T: Into<U>,
+    {
+        fn to_keyed_value(self) -> KeyedValue<KEY, U> {
+            KeyedValue(self.into())
         }
     }
+
+    pub struct KeyedValue<const KEY: &'static str, T>(pub T);
 
     impl<const KEY: &'static str, T> KeyedValue<KEY, T> {
         pub fn new(v: T) -> Self {
