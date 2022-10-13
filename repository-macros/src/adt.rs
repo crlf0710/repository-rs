@@ -372,6 +372,47 @@ impl utils::StreamingIterator for GeneralizedVariantIterMut<'_> {
     }
 }
 
+fn perform_decorate_on_ty(
+    ty: &syn::Type,
+    decorate_trait_path: &syn::Path,
+    decorator_path: &syn::Path,
+) -> syn::Result<syn::Type> {
+    let segment = match ty {
+        syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path { segments, .. },
+        }) if segments.len() == 1 => segments.first().unwrap(),
+        _ => {
+            return Err(syn::Error::new(
+                ty.span(),
+                "only single ident with generics types are supported",
+            ))
+        }
+    };
+    let result_ty = syn::Type::Path(syn::TypePath {
+        qself: Some(syn::QSelf {
+            lt_token: Default::default(),
+            ty: Box::new(syn::Type::Path(syn::TypePath {
+                qself: None,
+                path: decorator_path.clone(),
+            })),
+            position: decorate_trait_path.segments.len(),
+            as_token: Default::default(),
+            gt_token: Default::default(),
+        }),
+        path: syn::Path {
+            leading_colon: decorate_trait_path.leading_colon.clone(),
+            segments: decorate_trait_path
+                .segments
+                .iter()
+                .cloned()
+                .chain(Some(segment.clone()))
+                .collect(),
+        },
+    });
+    Ok(result_ty)
+}
+
 #[derive(Debug)]
 pub(crate) struct GeneralizedField {
     pub(crate) field: syn::Field,
@@ -396,6 +437,7 @@ impl GeneralizedField {
         field: &mut syn::Field,
         index_in_first_applicable_variant: usize,
         flags: GeneralizedFieldFlags,
+        decorate_fields: Option<&(syn::Path, syn::Path)>,
     ) -> syn::Result<Self> {
         let accessor = field
             .attrs
@@ -428,8 +470,12 @@ impl GeneralizedField {
                 ))
             }
         };
+        let mut field = field.clone();
+        if let Some((decorate_trait_path, decorator_path)) = decorate_fields {
+            field.ty = perform_decorate_on_ty(&field.ty, decorate_trait_path, decorator_path)?;
+        }
         let field = GeneralizedField {
-            field: field.clone(),
+            field,
             indexes_in_applicable_variants: vec![index_in_first_applicable_variant],
             accessor: accessor.map(IdentPair::from_snake_case_ident),
             hidden_accessor: hidden_accessor.map(IdentPair::from_snake_case_ident),
@@ -520,11 +566,13 @@ impl GeneralizedField {
         &self,
         is_mandatory: bool,
         use_keyed: bool,
+        use_decorate_field: bool,
         repo_crate_ident: &syn::Ident,
-    ) -> syn::Type {
+    ) -> (syn::Type, AdtConstructorParamWrapperKind) {
         let inner;
         let key = if use_keyed { self.key_ident() } else { None };
-        let keyed_inner;
+        let generated_inner;
+        let mut wrapper = AdtConstructorParamWrapperKind::None;
         if let Some(key) = key {
             let default_span = key.span();
             let ty_typed_value = crate::type_keyed_value(
@@ -534,17 +582,33 @@ impl GeneralizedField {
                 repo_crate_ident,
             );
             let trait_into = crate::trait_into_type(default_span, ty_typed_value);
-            keyed_inner = syn::Type::ImplTrait(syn::TypeImplTrait {
+            generated_inner = syn::Type::ImplTrait(syn::TypeImplTrait {
                 impl_token: Default::default(),
                 bounds: syn::punctuated::Punctuated::from_iter(vec![syn::TypeParamBound::Trait(
                     trait_into,
                 )]),
             });
-            inner = &keyed_inner;
+            inner = &generated_inner;
+            wrapper = wrapper.impl_into();
+        } else if use_decorate_field {
+            let default_span = self.field.ty.span();
+            let trait_into = crate::trait_into_type(default_span, self.field.ty.clone());
+            generated_inner = syn::Type::ImplTrait(syn::TypeImplTrait {
+                impl_token: Default::default(),
+                bounds: syn::punctuated::Punctuated::from_iter(vec![syn::TypeParamBound::Trait(
+                    trait_into,
+                )]),
+            });
+            inner = &generated_inner;
+            wrapper = wrapper.impl_into();
         } else {
             inner = &self.field.ty;
         }
-        utils::type_opt_if_not_mandatory(is_mandatory, &self.field.ty)
+        if is_mandatory {
+            (inner.clone(), wrapper)
+        } else {
+            (inner.clone().wrap_ty_with_option(), wrapper.opt())
+        }
     }
 
     pub(crate) fn build_entity_accessor(
@@ -969,6 +1033,30 @@ impl AdtVariantDefinition {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum AdtConstructorParamWrapperKind {
+    None,
+    Opt,
+    ImplInto,
+    OptImplInto,
+}
+
+impl AdtConstructorParamWrapperKind {
+    fn impl_into(self) -> Self {
+        match self {
+            Self::None | Self::ImplInto => Self::ImplInto,
+            Self::Opt | Self::OptImplInto => Self::OptImplInto,
+        }
+    }
+
+    fn opt(self) -> Self {
+        match self {
+            Self::None | Self::Opt => Self::Opt,
+            Self::ImplInto | Self::OptImplInto => Self::OptImplInto,
+        }
+    }
+}
+
 impl AdtVariantDefinition {
     fn iter_owned_fields_with_index_in_components<'a>(
         this: WithIndex<&Self>,
@@ -993,9 +1081,18 @@ impl AdtVariantDefinition {
         comp_def_idx_and_is_mandatory_list: impl Iterator<Item = (usize, bool)>,
         comp_defs: &Vec<AdtComponentDefinition>,
         use_keyed: bool,
+        use_decorate_field: bool,
         repo_crate_ident: &syn::Ident,
-    ) -> Vec<Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>> {
-        let mut initializer_param_list: Vec<Option<(_, _, _, _)>> = Vec::new();
+    ) -> Vec<
+        Option<(
+            syn::Ident,
+            syn::Type,
+            usize,
+            Option<syn::Ident>,
+            AdtConstructorParamWrapperKind,
+        )>,
+    > {
+        let mut initializer_param_list: Vec<Option<(_, _, _, _, _)>> = Vec::new();
         for (comp_def_idx, comp_is_mandatory) in comp_def_idx_and_is_mandatory_list {
             let comp_def = &comp_defs[comp_def_idx];
             for (field_idx_in_variant, field_def) in
@@ -1007,8 +1104,12 @@ impl AdtVariantDefinition {
                 assert!(initializer_param_list[field_idx_in_variant].is_none());
                 let variant_ctor_param_ident =
                     field_def.accessor_or_generative_naming_ident(field_idx_in_variant);
-                let variant_ctor_param_ty =
-                    field_def.ctor_param_ty(comp_is_mandatory, use_keyed, repo_crate_ident);
+                let (variant_ctor_param_ty, variant_ctor_param_wrapper) = field_def.ctor_param_ty(
+                    comp_is_mandatory,
+                    use_keyed,
+                    use_decorate_field,
+                    repo_crate_ident,
+                );
 
                 let variant_ctor_param_comp_def_idx = comp_def_idx;
                 let variant_ctor_param_comp_field_name = field_def.field.ident.clone();
@@ -1017,6 +1118,7 @@ impl AdtVariantDefinition {
                     variant_ctor_param_ty,
                     variant_ctor_param_comp_def_idx,
                     variant_ctor_param_comp_field_name,
+                    variant_ctor_param_wrapper,
                 ));
             }
         }
@@ -1025,14 +1127,20 @@ impl AdtVariantDefinition {
 
     fn prepare_adt_initializer_tokens(
         initializer_param_list: impl Iterator<
-            Item = Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>,
+            Item = Option<(
+                syn::Ident,
+                syn::Type,
+                usize,
+                Option<syn::Ident>,
+                AdtConstructorParamWrapperKind,
+            )>,
         >,
         allow_empty_slot: bool,
         template: impl Fn(&syn::Ident, &syn::Type) -> TokenStream2,
     ) -> Vec<TokenStream2> {
         initializer_param_list
             .flat_map(|initializer_param: Option<_>| {
-                let Some((param_ident, param_ty, _, _)) = initializer_param.as_ref() else {
+                let Some((param_ident, param_ty, _, _, _)) = initializer_param.as_ref() else {
                     if !allow_empty_slot {
                         unreachable!()
                     }
@@ -1094,7 +1202,15 @@ impl AdtVariantDefinition {
         this: &Self,
         comp_list: impl Iterator<Item = (usize, bool)>,
         comp_defs: &Vec<AdtComponentDefinition>,
-        initalizer_param_list: &Vec<Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>>,
+        initalizer_param_list: &Vec<
+            Option<(
+                syn::Ident,
+                syn::Type,
+                usize,
+                Option<syn::Ident>,
+                AdtConstructorParamWrapperKind,
+            )>,
+        >,
         use_keyed: bool,
         repo_crate_ident: &syn::Ident,
         repo_input_ident: &syn::Ident,
@@ -1112,16 +1228,15 @@ impl AdtVariantDefinition {
                     comp_style,
                     comp_ty.clone().into(),
                     use_keyed,
-                    !comp_is_mandatory,
                     initalizer_param_list
                         .iter()
                         .flat_map(|param| {
-                            let (param_ident, _, param_comp_idx, param_field_name) =
+                            let (param_ident, _, param_comp_idx, param_field_name, param_field_wrapper_kind) =
                                 param.as_ref()?;
                             if *param_comp_idx != comp_def_idx {
                                 return None;
                             }
-                            Some((param_field_name.as_ref(), param_ident))
+                            Some((param_field_name.as_ref(), param_ident, param_field_wrapper_kind))
                         }),
                 );
 
@@ -1141,7 +1256,15 @@ impl AdtVariantDefinition {
         this: &Self,
         comp_list: impl Iterator<Item = (usize, bool)>,
         comp_defs: &Vec<AdtComponentDefinition>,
-        initalizer_param_list: &Vec<Option<(syn::Ident, syn::Type, usize, Option<syn::Ident>)>>,
+        initalizer_param_list: &Vec<
+            Option<(
+                syn::Ident,
+                syn::Type,
+                usize,
+                Option<syn::Ident>,
+                AdtConstructorParamWrapperKind,
+            )>,
+        >,
         use_keyed: bool,
         repo_crate_ident: &syn::Ident,
         repo_input_ident: &syn::Ident,
@@ -1157,16 +1280,15 @@ impl AdtVariantDefinition {
                     comp_style,
                     comp_ty.clone().into(),
                     use_keyed,
-                    !comp_is_mandatory,
                     initalizer_param_list
                         .iter()
                         .flat_map(|param| {
-                            let (param_ident, _, param_comp_idx, param_field_name) =
+                            let (param_ident, _, param_comp_idx, param_field_name, param_field_wrapper_kind) =
                                 param.as_ref()?;
                             if *param_comp_idx != comp_def_idx {
                                 return None;
                             }
-                            Some((param_field_name.as_ref(), param_ident))
+                            Some((param_field_name.as_ref(), param_ident, param_field_wrapper_kind))
                         }),
                 );
 
@@ -1186,6 +1308,7 @@ impl AdtVariantDefinition {
         this: WithIndex<&Self>,
         comp_defs: &Vec<AdtComponentDefinition>,
         use_keyed: bool,
+        use_decorate_field: bool,
         repo_crate_ident: &syn::Ident,
         default_span: proc_macro2::Span,
         repo_ty: &syn::Path,
@@ -1206,6 +1329,7 @@ impl AdtVariantDefinition {
             setup_comp_list.clone(),
             comp_defs,
             use_keyed,
+            use_decorate_field,
             repo_crate_ident,
         );
 
@@ -1262,6 +1386,7 @@ impl AdtVariantDefinition {
         stor_args_values: proc_macro2::TokenStream,
         comp_defs: &Vec<AdtComponentDefinition>,
         use_keyed: bool,
+        use_decorate_field: bool,
         repo_crate_ident: &syn::Ident,
         default_span: proc_macro2::Span,
         repo_ty: &syn::Path,
@@ -1339,6 +1464,7 @@ impl AdtVariantDefinition {
             setup_comp_list.clone(),
             comp_defs,
             use_keyed,
+            use_decorate_field,
             repo_crate_ident,
         );
 
@@ -1415,6 +1541,7 @@ impl AdtVariantDefinition {
         src_var_def: WithIndex<&Self>,
         comp_defs: &Vec<AdtComponentDefinition>,
         use_keyed: bool,
+        use_decorate_field: bool,
         repo_crate_ident: &syn::Ident,
         default_span: proc_macro2::Span,
         repo_ty: &syn::Path,
@@ -1455,6 +1582,7 @@ impl AdtVariantDefinition {
             setup_comp_list.clone(),
             comp_defs,
             use_keyed,
+            use_decorate_field,
             repo_crate_ident,
         );
 
@@ -1501,19 +1629,29 @@ fn expr_build_adt<'a>(
     adt_ctor_style: AdtVariantCtorStyle,
     adt_ctor: syn::Path,
     use_keyed: bool,
-    is_values_wrapped_in_some: bool,
-    param_list: impl Iterator<Item = (Option<&'a syn::Ident>, &'a syn::Ident)>,
+    param_list: impl Iterator<
+        Item = (
+            Option<&'a syn::Ident>,
+            &'a syn::Ident,
+            &'a AdtConstructorParamWrapperKind,
+        ),
+    >,
 ) -> proc_macro2::TokenStream {
     match adt_ctor_style {
         AdtVariantCtorStyle::BraceNamed => {
             if !use_keyed {
                 let param_list = param_list
-                    .map(|(field_name, field_value)| {
+                    .map(|(field_name, field_value, field_wrapper_kind)| {
                         let field_name = field_name.unwrap();
-                        let field_value = if !is_values_wrapped_in_some {
-                            quote!(#field_value)
-                        } else {
-                            quote!((#field_value).unwrap())
+                        let field_value = match field_wrapper_kind {
+                            AdtConstructorParamWrapperKind::None => quote!(#field_value),
+                            AdtConstructorParamWrapperKind::Opt => quote!((#field_value).unwrap()),
+                            AdtConstructorParamWrapperKind::ImplInto => {
+                                quote!((#field_value).into())
+                            }
+                            AdtConstructorParamWrapperKind::OptImplInto => {
+                                quote!((#field_value).unwrap().into())
+                            }
                         };
                         quote!(#field_name: #field_value,)
                     })
@@ -1527,12 +1665,15 @@ fn expr_build_adt<'a>(
         }
         AdtVariantCtorStyle::ParenUnamed => {
             let param_list = param_list
-                .map(|(field_name, field_value)| {
+                .map(|(field_name, field_value, field_wrapper_kind)| {
                     assert!(field_name.is_none());
-                    let field_value = if !is_values_wrapped_in_some {
-                        quote!(#field_value)
-                    } else {
-                        quote!((#field_value).unwrap())
+                    let field_value = match field_wrapper_kind {
+                        AdtConstructorParamWrapperKind::None => quote!(#field_value),
+                        AdtConstructorParamWrapperKind::Opt => quote!((#field_value).unwrap()),
+                        AdtConstructorParamWrapperKind::ImplInto => quote!((#field_value).into()),
+                        AdtConstructorParamWrapperKind::OptImplInto => {
+                            quote!((#field_value).unwrap().into())
+                        }
                     };
 
                     quote!(#field_value , )
@@ -1648,6 +1789,7 @@ pub(crate) fn collect_adt_variants_and_components(
     item: ItemAdtMutRef<'_>,
     adt_kind: AdtKind,
     inherent_group_ident: &IdentPair,
+    decorate_fields: Option<&(syn::Path, syn::Path)>,
 ) -> syn::Result<(Vec<AdtVariantDefinition>, Vec<AdtComponentDefinition>)> {
     use syn::spanned::Spanned;
     use utils::PushAndGetWithIndex;
@@ -1820,7 +1962,10 @@ pub(crate) fn collect_adt_variants_and_components(
                 comp_defs[field_comp_def_idx]
                     .fields
                     .push(GeneralizedField::new_from_syn_field(
-                        field, field_idx, flags,
+                        field,
+                        field_idx,
+                        flags,
+                        decorate_fields,
                     )?);
                 assert_eq!(
                     1,
@@ -1852,7 +1997,10 @@ pub(crate) fn collect_adt_variants_and_components(
             comp_defs[field_comp_def_idx]
                 .fields
                 .push(GeneralizedField::new_from_syn_field(
-                    &mut field, field_idx, flags,
+                    &mut field,
+                    field_idx,
+                    flags,
+                    decorate_fields,
                 )?);
             assert_eq!(
                 1,

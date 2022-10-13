@@ -1,5 +1,6 @@
 #![allow(dead_code, unused)]
 
+use crate::utils::GeneralizedMeta;
 use crate::utils::IdentPair;
 use crate::utils::IdentText;
 use crate::utils::TyWrap;
@@ -239,6 +240,7 @@ fn interned_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) ->
         data_struct.borrow_mut(),
         adt::AdtKind::Interned,
         &utils::IdentPair::from_camel_case_ident(data_ident.clone()),
+        None
     ));
 
     let ctor_definitions = var_defs
@@ -500,6 +502,21 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
     let mut item = parse_macro_input!(item as adt::ItemStructOrEnum);
     let option_crate_name = ident_crate_repo(item.span());
     let derives = adt::attrs_take_with_ident_name(item.attrs_mut(), "derive").collect::<Vec<_>>();
+    let decorate_fields =
+        adt::attrs_take_with_ident_name(item.attrs_mut(), "decorate_field").collect::<Vec<_>>();
+    let decorate_fields = match &decorate_fields[..] {
+        [] => None,
+        [x] => Some(unwrap_result_in_macro!(
+            GeneralizedMeta::parse_attribute(x).and_then(|x| x.get_path_for_path_value())
+        )),
+        [x, y, ..] => {
+            bail_in_macro!(syn::Error::new(
+                y.span(),
+                "multiple `decorate_field` specified",
+            ));
+        }
+    };
+    let use_decorate_field = decorate_fields.is_some();
 
     let handle_ident = item.name();
     validate_name_in_macro!(handle_ident);
@@ -515,7 +532,8 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
     let (var_defs, comp_defs) = unwrap_result_in_macro!(adt::collect_adt_variants_and_components(
         item.borrow_mut(),
         adt::AdtKind::Entity,
-        &utils::IdentPair::from_camel_case_ident(inherent_ident.clone())
+        &utils::IdentPair::from_camel_case_ident(inherent_ident.clone()),
+        decorate_fields.as_ref()
     ));
 
     let mut component_definitions: Vec<TokenStream2> = Vec::new();
@@ -602,6 +620,7 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
                 var_def,
                 &comp_defs,
                 use_keyed,
+                use_decorate_field,
                 &option_crate_name,
                 handle_ident.span(),
                 &repo_ty,
@@ -627,6 +646,7 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
                 stor_args_values,
                 &comp_defs,
                 use_keyed,
+                use_decorate_field,
                 &option_crate_name,
                 handle_ident.span(),
                 &repo_ty,
@@ -645,6 +665,7 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
                 src_var_def,
                 &comp_defs,
                 use_keyed,
+                use_decorate_field,
                 &option_crate_name,
                 handle_ident.span(),
                 &repo_ty,

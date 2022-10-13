@@ -136,6 +136,12 @@ macro_rules! ensure_in_macro {
     };
 }
 
+macro_rules! bail_in_macro {
+    ($value:expr) => {
+        return TokenStream::from($value.to_compile_error());
+    };
+}
+
 macro_rules! unwrap_result_in_macro {
     ($value:expr) => {
         match $value {
@@ -209,6 +215,8 @@ pub(crate) enum GeneralizedMeta {
     Lit(syn::Lit),
 
     Path(syn::Path),
+
+    PathForPath(MetaPathForPath),
 
     List(GeneralizedMetaList),
 
@@ -291,7 +299,15 @@ impl GeneralizedMeta {
     }
 
     fn parse_after_path(path: syn::Path, input: syn::parse::ParseStream) -> syn::Result<Self> {
-        if input.peek(syn::token::Paren) {
+        if input.peek(syn::Token![for]) {
+            let for_token = input.parse()?;
+            let for_path = input.call(Self::parse_meta_path)?;
+            Ok(GeneralizedMeta::PathForPath(MetaPathForPath {
+                path,
+                for_token,
+                for_path,
+            }))
+        } else if input.peek(syn::token::Paren) {
             let content;
             Ok(GeneralizedMetaList {
                 path,
@@ -338,7 +354,8 @@ impl GeneralizedMeta {
             }
             GeneralizedMeta::Path(path)
             | GeneralizedMeta::List(GeneralizedMetaList { path, .. })
-            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. }) => Err(syn::Error::new(
+            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. })
+            | GeneralizedMeta::PathForPath(MetaPathForPath { path, .. }) => Err(syn::Error::new(
                 path.span(),
                 "should specify an ident for attribute",
             )),
@@ -376,7 +393,8 @@ impl GeneralizedMeta {
                     }
                     GeneralizedMeta::List(GeneralizedMetaList { path, .. })
                     | GeneralizedMeta::NamePath(MetaNamePathValue { path, .. })
-                    | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. }) => Err(
+                    | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. })
+                    | GeneralizedMeta::PathForPath(MetaPathForPath { path, .. }) => Err(
                         syn::Error::new(path.span(), "should specify an ident for attribute"),
                     ),
                     GeneralizedMeta::Lit(lit) => Err(syn::Error::new(
@@ -386,7 +404,8 @@ impl GeneralizedMeta {
                 })
                 .collect(),
             GeneralizedMeta::Path(path)
-            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. }) => Err(syn::Error::new(
+            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. })
+            | GeneralizedMeta::PathForPath(MetaPathForPath { path, .. }) => Err(syn::Error::new(
                 path.span(),
                 "should specify an ident for attribute",
             )),
@@ -408,7 +427,8 @@ impl GeneralizedMeta {
                     GeneralizedMeta::Path(path) => Ok(path.clone()),
                     GeneralizedMeta::List(GeneralizedMetaList { path, .. })
                     | GeneralizedMeta::NamePath(MetaNamePathValue { path, .. })
-                    | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. }) => Err(
+                    | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. })
+                    | GeneralizedMeta::PathForPath(MetaPathForPath { path, .. }) => Err(
                         syn::Error::new(path.span(), "should specify a path for attribute"),
                     ),
                     GeneralizedMeta::Lit(lit) => Err(syn::Error::new(
@@ -418,13 +438,74 @@ impl GeneralizedMeta {
                 })
                 .collect(),
             GeneralizedMeta::Path(path)
-            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. }) => Err(syn::Error::new(
+            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. })
+            | GeneralizedMeta::PathForPath(MetaPathForPath { path, .. }) => Err(syn::Error::new(
                 path.span(),
                 "should specify a path for attribute",
             )),
             GeneralizedMeta::Lit(lit) => Err(syn::Error::new(
                 lit.span(),
                 "should specify a path for attribute",
+            )),
+        }
+    }
+
+    pub(crate) fn get_path_for_path_value(&self) -> syn::Result<(syn::Path, syn::Path)> {
+        match self {
+            GeneralizedMeta::List(GeneralizedMetaList { path, nested, .. }) => {
+                let mut result = None;
+                for meta in nested.iter() {
+                    match meta {
+                        GeneralizedMeta::PathForPath(MetaPathForPath {
+                            path: path1,
+                            for_path: path2,
+                            ..
+                        }) => {
+                            if result.is_none() {
+                                result = Some((path1.clone(), path2.clone()));
+                            } else {
+                                return Err(syn::Error::new(
+                                    path.span(),
+                                    "should specify a single group of path for path for attribute",
+                                ));
+                            }
+                        }
+                        GeneralizedMeta::Path(path)
+                        | GeneralizedMeta::List(GeneralizedMetaList { path, .. })
+                        | GeneralizedMeta::NamePath(MetaNamePathValue { path, .. })
+                        | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. }) => {
+                            return Err(syn::Error::new(
+                                path.span(),
+                                "should specify a single group of path for path for attribute",
+                            ))
+                        }
+                        GeneralizedMeta::Lit(lit) => {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                "should specify a single group of path for path for attribute",
+                            ))
+                        }
+                    }
+                }
+                if let Some(result) = result {
+                    Ok(result)
+                } else {
+                    Err(syn::Error::new(
+                        path.span(),
+                        "should specify a single group of path for path for attribute",
+                    ))
+                }
+            }
+            GeneralizedMeta::Path(path)
+            | GeneralizedMeta::NamePath(MetaNamePathValue { path, .. })
+            | GeneralizedMeta::NameLit(MetaNameLitValue { path, .. })
+            | GeneralizedMeta::PathForPath(MetaPathForPath { path, .. }) => Err(syn::Error::new(
+                path.span(),
+                "should specify a path for path for attribute",
+            )),
+            GeneralizedMeta::Lit(lit) => Err(syn::Error::new(
+                lit.span(),
+                "should specify a path for path for attribute",
             )),
         }
     }
@@ -442,6 +523,13 @@ pub(crate) struct MetaNamePathValue {
     pub(crate) path: syn::Path,
     pub(crate) eq_token: syn::Token![=],
     pub(crate) value: syn::Path,
+}
+
+#[derive(Debug)]
+pub(crate) struct MetaPathForPath {
+    pub(crate) path: syn::Path,
+    pub(crate) for_token: syn::Token![for],
+    pub(crate) for_path: syn::Path,
 }
 
 type MetaNameLitValue = syn::MetaNameValue;
@@ -715,14 +803,6 @@ impl TyWrap for syn::Type {
                 }]),
             },
         })
-    }
-}
-
-pub(crate) fn type_opt_if_not_mandatory(is_mandatory: bool, ty: &syn::Type) -> syn::Type {
-    if is_mandatory {
-        ty.clone()
-    } else {
-        ty.clone().wrap_ty_with_option()
     }
 }
 
