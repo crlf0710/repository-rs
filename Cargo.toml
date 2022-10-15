@@ -17,7 +17,7 @@ keyed = []
 [dependencies]
 repository-macros = {version = "0.1.0", path = "repository-macros"}
 elsa = "1.7.0"
-indexmap = "1.9.1"
+indexmap = {version = "1.9.1", features = ["std"]}
 
 [workspace]
 members = ["repository-macros"]

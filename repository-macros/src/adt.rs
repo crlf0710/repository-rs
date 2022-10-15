@@ -1514,7 +1514,14 @@ impl AdtVariantDefinition {
         let stor_args_tys = Self::prepare_adt_initializer_tokens(
             variant_stor_param_list.into_iter(),
             false,
-            |_, param_type| quote!(#param_type,),
+            |_, param_type| {
+                // FIXME: temporary workaround for current language limitation
+                if matches!(param_type, syn::Type::ImplTrait(..)) {
+                    quote!(_,)
+                } else {
+                    quote!(#param_type,)
+                }
+            },
         );
         quote! {
             #[allow(non_snake_case)]
