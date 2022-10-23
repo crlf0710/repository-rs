@@ -527,6 +527,8 @@ pub mod interned {
         const SHARING_BETWEEN_REPOS: bool;
         fn repo_id(&self) -> Id;
         fn interned_id(&self) -> Id;
+
+        fn from_raw(repo_id: Id, interned_id: Id) -> Self;
     }
 
     pub fn kiosk_sharing_interned_entry<T: Interned>() -> Id {
@@ -553,6 +555,10 @@ pub mod interned {
                 ])
             })
             .unwrap()
+    }
+
+    pub fn shared_fictional_repo_id() -> Id {
+        Id::INVALID
     }
 
     #[derive(Clone, Copy)]
@@ -587,6 +593,8 @@ pub mod entity {
     pub trait Entity: Any + Sized {
         fn repo_id(&self) -> Id;
         fn entity_id(&self) -> Id;
+
+        fn from_raw(repo_id: Id, interned_id: Id) -> Self;
     }
 
     pub fn kiosk_entity_entry<T: Entity>(repo_id: Id) -> Id {
@@ -616,6 +624,62 @@ pub mod entity {
         fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
             self.0.repo_id().hash(state);
             self.0.entity_id().hash(state);
+        }
+    }
+}
+
+pub mod any {
+    use crate::entity::{self, Entity};
+    use crate::id::Id;
+    use crate::interned::{self, Interned};
+    use crate::repo::Repo;
+
+    #[derive(Clone, Copy, Debug)]
+    pub struct Any {
+        inherent_entry_id: Id,
+        adt_id: Id,
+    }
+
+    impl Any {
+        pub fn from_interned<T: Interned>(v: T) -> Any {
+            Any {
+                inherent_entry_id: if T::SHARING_BETWEEN_REPOS {
+                    interned::kiosk_sharing_interned_entry::<T>()
+                } else {
+                    interned::kiosk_nonsharing_interned_entry::<T>(v.repo_id())
+                },
+                adt_id: v.interned_id(),
+            }
+        }
+        pub fn from_entity<T: Entity>(v: T) -> Any {
+            Any {
+                inherent_entry_id: entity::kiosk_entity_entry::<T>(v.repo_id()),
+                adt_id: v.entity_id(),
+            }
+        }
+        pub fn downcast_interned<T: Interned>(self, repo: &impl Repo) -> Result<T, Self> {
+            let repo_id;
+            let expected_inherent_entry_id = if T::SHARING_BETWEEN_REPOS {
+                repo_id = interned::shared_fictional_repo_id();
+                interned::kiosk_sharing_interned_entry::<T>()
+            } else {
+                repo_id = repo.repo_id();
+                interned::kiosk_nonsharing_interned_entry::<T>(repo_id)
+            };
+            if self.inherent_entry_id == expected_inherent_entry_id {
+                Ok(T::from_raw(repo_id, self.adt_id))
+            } else {
+                Err(self)
+            }
+        }
+        pub fn downcast_entity<T: Entity>(self, repo: &impl Repo) -> Result<T, Self> {
+            let repo_id = repo.repo_id();
+            let expected_inherent_entry_id = entity::kiosk_entity_entry::<T>(repo.repo_id());
+            if self.inherent_entry_id == expected_inherent_entry_id {
+                Ok(T::from_raw(repo_id, self.adt_id))
+            } else {
+                Err(self)
+            }
         }
     }
 }

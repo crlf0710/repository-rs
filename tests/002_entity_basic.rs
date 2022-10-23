@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use repo::any::Any;
+
 #[repo::repo]
 #[member(Color, Fruit)]
 #[derive(Default)]
@@ -38,4 +40,12 @@ fn test_0002() {
     fruit2.transition_to_apple_from_banana(Color::new_red(&mut repo), 21, &mut repo);
 
     assert!(fruit2.radius(&repo).unwrap() > fruit1.radius(&repo).unwrap());
+
+    let fruit2: Any = fruit2.into();
+
+    assert!(fruit2.downcast_interned::<Color>(&repo).is_err());
+
+    let fruit2 = fruit2.downcast_entity::<Fruit>(&repo).unwrap();
+
+    assert_eq!(fruit2.radius(&repo).unwrap(), 21);
 }

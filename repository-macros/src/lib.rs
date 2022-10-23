@@ -428,6 +428,20 @@ fn interned_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) ->
             fn interned_id(&self) -> #option_crate_name ::id::Id {
                 self.interned_id
             }
+
+            fn from_raw(repo_id: #option_crate_name ::id::Id, interned_id: #option_crate_name ::id::Id) -> Self {
+                #handle_ident {
+                    repo_id,
+                    interned_id,
+                    marker: Default::default(),
+                }
+            }
+        }
+
+        impl From<#handle_ident> for #option_crate_name ::any::Any {
+            fn from(v: #handle_ident) -> Self {
+                Self::from_interned(v)
+            }
         }
 
         impl #handle_ident {
@@ -720,6 +734,20 @@ fn entity_macro_impl(attr: TokenStream, item: TokenStream, use_keyed: bool) -> T
             }
             fn entity_id(&self) -> #option_crate_name ::id::Id {
                 self.entity_id
+            }
+
+            fn from_raw(repo_id: #option_crate_name ::id::Id, entity_id: #option_crate_name ::id::Id) -> Self {
+                #handle_ident {
+                    repo_id,
+                    entity_id,
+                    marker: Default::default(),
+                }
+            }
+        }
+
+        impl From<#handle_ident> for #option_crate_name ::any::Any {
+            fn from(v: #handle_ident) -> Self {
+                Self::from_entity(v)
             }
         }
 

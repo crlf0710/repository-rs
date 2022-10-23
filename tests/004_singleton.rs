@@ -1,3 +1,5 @@
+use repo::any::Any;
+
 #[repo::repo]
 #[member(Everything, Answer)]
 #[derive(Default)]
@@ -23,6 +25,12 @@ fn test_0004() {
     let mut repo = Repo::default();
 
     let everything = Everything::singleton(&mut repo);
+
+    assert_eq!(42, everything.answer(&mut repo).unwrap().value(&mut repo));
+
+    let any: Any = everything.into();
+
+    let everything = any.downcast_entity::<Everything>(&repo).unwrap();
 
     assert_eq!(42, everything.answer(&mut repo).unwrap().value(&mut repo));
 }
